@@ -44,3 +44,12 @@
 
 多语言翻译依赖 Claude。
 
+# 源码构建
+首次克隆后，请先安装 Node 依赖：
+
+```bash
+cd NodeProject
+npm install
+```
+
+然后使用 Xcode 打开 `Pastel.xcodeproj` 构建运行。

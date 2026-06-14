@@ -1,0 +1,27 @@
+.DS_Store
+
+# Xcode
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Node
+NodeProject/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Distribution artifacts
+*.dmg
+*.zip
+*.xcarchive
+
+# Local environment
+.env
+.env.*
