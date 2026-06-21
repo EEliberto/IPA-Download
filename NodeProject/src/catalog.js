@@ -32,7 +32,45 @@ function extractAppId(input) {
     return '';
 }
 
-function normalizeApp(item, source = 'apple') {
+function normalizeSearchPlatform(value) {
+    const platform = asText(value).toLowerCase().replace(/[\s_-]+/g, '');
+    if (platform === 'ipad' || platform === 'ipados' || platform === 'tablet') return 'ipad';
+    if (platform === 'vision' || platform === 'visionpro' || platform === 'visionos' || platform === 'applevisionpro') return 'vision';
+    return 'iphone';
+}
+
+function searchEntityForPlatform(platform) {
+    return platform === 'ipad' ? 'iPadSoftware' : 'software';
+}
+
+function appPlatformFromItem(item, fallback = '') {
+    const normalizedFallback = normalizeSearchPlatform(fallback);
+    if (normalizedFallback === 'vision') return 'vision';
+    const supportedDevices = Array.isArray(item?.supportedDevices) ? item.supportedDevices : [];
+    const searchable = [
+        ...supportedDevices,
+        ...(Array.isArray(item?.features) ? item.features : []),
+        item?.kind,
+        item?.trackViewUrl,
+    ].map(value => asText(value).toLowerCase());
+    if (searchable.some(value => value.includes('vision') || value.includes('reality'))) return 'vision';
+    if (normalizedFallback === 'ipad') return 'ipad';
+    return 'iphone';
+}
+
+function isVisionCompatibleItem(item) {
+    const supportedDevices = Array.isArray(item?.supportedDevices) ? item.supportedDevices : [];
+    const searchable = [
+        ...supportedDevices,
+        ...(Array.isArray(item?.features) ? item.features : []),
+        item?.kind,
+        item?.trackViewUrl,
+    ].map(value => asText(value).toLowerCase());
+
+    return searchable.some(value => value.includes('vision') || value.includes('reality'));
+}
+
+function normalizeApp(item, source = 'apple', platform = '') {
     return {
         id: asText(item.trackId),
         name: asText(item.trackName || item.trackCensoredName),
@@ -46,6 +84,7 @@ function normalizeApp(item, source = 'apple') {
         trackViewUrl: asText(item.trackViewUrl),
         currentVersionReleaseDate: asText(item.currentVersionReleaseDate || item.releaseDate),
         source,
+        platform: appPlatformFromItem(item, platform),
     };
 }
 
@@ -63,6 +102,7 @@ function normalizeRSSApp(item, source = 'apple-rss') {
         trackViewUrl: asText(item.url),
         currentVersionReleaseDate: asText(item.releaseDate),
         source,
+        platform: normalizeSearchPlatform(source),
     };
 }
 
@@ -85,21 +125,64 @@ function normalizeLegacyRSSApp(item, source = 'apple-rss') {
         trackViewUrl: link,
         currentVersionReleaseDate: asText(item?.['im:releaseDate']?.label),
         source,
+        platform: normalizeSearchPlatform(source),
     };
 }
 
-async function lookupAppsByIds(ids, {country = 'cn'} = {}) {
+function extractAppleAppIdsFromHTML(html) {
+    const ids = [];
+    const seen = new Set();
+    const text = asText(html);
+    const patterns = [
+        /https:\/\/apps\.apple\.com\/[^"'/?#]+\/app\/[^"'?#]*\/id(\d{5,})(?=[?"'#])/g,
+        /\/app\/[^"'?#]*\/id(\d{5,})(?=[?"'#])/g,
+    ];
+
+    for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+            const id = match[1];
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            ids.push(id);
+        }
+    }
+
+    return ids;
+}
+
+async function fetchVisionAppIDs({country = 'cn', term = ''} = {}) {
+    const cleanCountry = asText(country).toLowerCase() || 'cn';
+    const cleanTerm = asText(term);
+    const url = cleanTerm
+        ? `https://apps.apple.com/${cleanCountry}/vision/search?term=${encodeURIComponent(cleanTerm)}`
+        : `https://apps.apple.com/${cleanCountry}/vision/apps-and-games`;
+    const {data} = await catalogClient.get(url, {
+        headers: {
+            'Accept': 'text/html,application/xhtml+xml',
+        },
+    });
+    return extractAppleAppIdsFromHTML(data);
+}
+
+async function lookupAppsByIds(ids, {country = 'cn', platform = 'iphone'} = {}) {
     if (!ids.length) return [];
+    const cleanPlatform = normalizeSearchPlatform(platform);
 
     const {data} = await catalogClient.get('https://itunes.apple.com/lookup', {
         params: {
             id: ids.join(','),
             country,
-            entity: 'software',
+            entity: searchEntityForPlatform(cleanPlatform),
         },
     });
 
-    const apps = Array.isArray(data.results) ? data.results.map(item => normalizeApp(item)) : [];
+    let rawResults = Array.isArray(data.results) ? data.results : [];
+    if (cleanPlatform === 'vision') {
+        const visionResults = rawResults.filter(isVisionCompatibleItem);
+        if (visionResults.length) rawResults = visionResults;
+    }
+    const apps = rawResults.map(item => normalizeApp(item, 'apple', cleanPlatform));
     const byId = new Map(apps.map(app => [app.id, app]));
     return ids.map(id => byId.get(id)).filter(Boolean);
 }
@@ -123,16 +206,22 @@ async function appPriceInfo(appId, {country = 'us'} = {}) {
     }
 }
 
-async function lookupApp(appId, {country = 'cn'} = {}) {
+async function lookupApp(appId, {country = 'cn', platform = 'iphone'} = {}) {
+    const cleanPlatform = normalizeSearchPlatform(platform);
     const {data} = await catalogClient.get('https://itunes.apple.com/lookup', {
         params: {
             id: appId,
             country,
-            entity: 'software',
+            entity: searchEntityForPlatform(cleanPlatform),
         },
     });
 
-    const results = Array.isArray(data.results) ? data.results.map(item => normalizeApp(item)) : [];
+    let rawResults = Array.isArray(data.results) ? data.results : [];
+    if (cleanPlatform === 'vision') {
+        const visionResults = rawResults.filter(isVisionCompatibleItem);
+        if (visionResults.length) rawResults = visionResults;
+    }
+    const results = rawResults.map(item => normalizeApp(item, 'apple', cleanPlatform));
     return {
         queryType: 'lookup',
         count: results.length,
@@ -140,22 +229,40 @@ async function lookupApp(appId, {country = 'cn'} = {}) {
     };
 }
 
-async function searchApps(term, {country = 'cn', limit = 30} = {}) {
+async function searchApps(term, {country = 'cn', platform = 'iphone', limit = 30} = {}) {
+    const cleanPlatform = normalizeSearchPlatform(platform);
+    const cleanLimit = Math.max(1, Math.min(Number(limit) || 30, 200));
     const appId = extractAppId(term);
     if (appId) {
-        return lookupApp(appId, {country});
+        return lookupApp(appId, {country, platform: cleanPlatform});
+    }
+
+    if (cleanPlatform === 'vision') {
+        const ids = await fetchVisionAppIDs({country, term});
+        const detailed = await lookupAppsByIds(ids, {country, platform: cleanPlatform});
+        const results = detailed.slice(0, cleanLimit);
+        return {
+            queryType: 'search',
+            count: detailed.length,
+            results,
+        };
     }
 
     const {data} = await catalogClient.get('https://itunes.apple.com/search', {
         params: {
             term,
             country,
-            entity: 'software',
-            limit,
+            entity: searchEntityForPlatform(cleanPlatform),
+            limit: cleanPlatform === 'vision' ? Math.min(cleanLimit * 4, 200) : cleanLimit,
         },
     });
 
-    const results = Array.isArray(data.results) ? data.results.map(item => normalizeApp(item)) : [];
+    let rawResults = Array.isArray(data.results) ? data.results : [];
+    if (cleanPlatform === 'vision') {
+        const visionResults = rawResults.filter(isVisionCompatibleItem);
+        if (visionResults.length) rawResults = visionResults;
+    }
+    const results = rawResults.slice(0, cleanLimit).map(item => normalizeApp(item, 'apple', cleanPlatform));
     return {
         queryType: 'search',
         count: results.length,
@@ -163,11 +270,15 @@ async function searchApps(term, {country = 'cn', limit = 30} = {}) {
     };
 }
 
-async function fetchRankedRSSApps(country) {
-    const feeds = [
-        {url: `https://itunes.apple.com/${country}/rss/topfreeapplications/limit=100/json`, legacy: true},
-        {url: `https://itunes.apple.com/${country}/rss/toppaidapplications/limit=100/json`, legacy: true},
-    ];
+async function fetchRankedRSSApps(country, platform = 'iphone') {
+    const cleanPlatform = normalizeSearchPlatform(platform);
+    const feedNames = cleanPlatform === 'ipad'
+        ? ['topfreeipadapplications', 'toppaidipadapplications']
+        : ['topfreeapplications', 'toppaidapplications'];
+    const feeds = feedNames.map(name => ({
+        url: `https://itunes.apple.com/${country}/rss/${name}/limit=100/json`,
+        legacy: true,
+    }));
     const feedResponses = await Promise.allSettled(
         feeds.map(feed => catalogClient.get(feed.url).then(response => ({...response, legacy: feed.legacy})))
     );
@@ -209,16 +320,32 @@ async function fetchRankedRSSApps(country) {
     return apps;
 }
 
-async function featuredApps({country = 'cn', limit = 30, offset = 0} = {}) {
+async function featuredApps({country = 'cn', platform = 'iphone', limit = 30, offset = 0} = {}) {
     const cleanCountry = asText(country).toLowerCase() || 'cn';
+    const cleanPlatform = normalizeSearchPlatform(platform);
     const cleanLimit = Math.max(1, Math.min(Number(limit) || 30, 200));
     const cleanOffset = Math.max(0, Number(offset) || 0);
-    const apps = await fetchRankedRSSApps(cleanCountry);
+
+    if (cleanPlatform === 'vision') {
+        const ids = await fetchVisionAppIDs({country: cleanCountry});
+        const pageIDs = ids.slice(cleanOffset, cleanOffset + cleanLimit);
+        const results = await lookupAppsByIds(pageIDs, {country: cleanCountry, platform: cleanPlatform});
+        return {
+            queryType: 'featured',
+            count: ids.length,
+            offset: cleanOffset,
+            limit: cleanLimit,
+            hasMore: cleanOffset + cleanLimit < ids.length,
+            results,
+        };
+    }
+
+    const apps = await fetchRankedRSSApps(cleanCountry, cleanPlatform);
     const results = apps.slice(cleanOffset, cleanOffset + cleanLimit);
 
     // 榜单 RSS 不含体积/版本等字段，用 lookup 批量补全本页 App 的真实大小（右侧显示体积而非排名）。
     try {
-        const detailed = await lookupAppsByIds(results.map(app => app.id).filter(Boolean), {country: cleanCountry});
+        const detailed = await lookupAppsByIds(results.map(app => app.id).filter(Boolean), {country: cleanCountry, platform: cleanPlatform});
         const byId = new Map(detailed.map(app => [app.id, app]));
         for (const app of results) {
             const full = byId.get(app.id);

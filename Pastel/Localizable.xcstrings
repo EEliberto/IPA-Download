@@ -379,7 +379,6 @@
       }
     },
     "App ID %@" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -414,6 +413,7 @@
       }
     },
     "App Store 地区，例如 cn、us、jp" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -489,6 +489,74 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "App 清單載入失敗：%@"
+          }
+        }
+      }
+    },
+    "Apple Vision Pro" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Vision Pro"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Vision Pro"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Vision Pro"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Vision Pro"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Vision Pro"
+          }
+        }
+      }
+    },
+    "Apple Vision Pro 的 App 历史版本目前仅在 Apple 来源提供，其他来源并未收录。" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Vision Pro app version history is currently available only from Apple. Other sources do not include it."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Vision Pro の App 履歴バージョンは現在 Apple ソースのみで提供されています。その他のソースには収録されていません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Vision Pro 앱의 버전 기록은 현재 Apple 소스에서만 제공됩니다. 다른 소스에는 포함되어 있지 않습니다."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ประวัติเวอร์ชันของแอป Apple Vision Pro มีให้จากแหล่ง Apple เท่านั้นในขณะนี้ แหล่งอื่นยังไม่ได้รวบรวมไว้"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Vision Pro 的 App 歷史版本目前僅在 Apple 來源提供，其他來源並未收錄。"
           }
         }
       }
@@ -1271,6 +1339,7 @@
       }
     },
     "下载此版本" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1351,6 +1420,7 @@
       }
     },
     "下载进度 %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -2062,6 +2132,9 @@
         }
       }
     },
+    "最新版本" : {
+
+    },
     "凭据加密失败" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -2186,6 +2259,7 @@
       }
     },
     "切换到账户" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -2505,6 +2579,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "前往"
+          }
+        }
+      }
+    },
+    "前往 Apple 来源获取" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Go to Apple Source"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple ソースへ移動"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 소스로 이동"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไปยังแหล่ง Apple"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前往 Apple 來源取得"
           }
         }
       }
@@ -2982,6 +3090,7 @@
       }
     },
     "在「搜索」里查看这个 App" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -3335,9 +3444,6 @@
           }
         }
       }
-    },
-    "复制 Device GUID" : {
-
     },
     "大小" : {
       "localizations" : {
@@ -4046,9 +4152,6 @@
         }
       }
     },
-    "已复制" : {
-
-    },
     "已清除本地保存的账户" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -4526,6 +4629,7 @@
       }
     },
     "当前使用" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -4560,6 +4664,7 @@
       }
     },
     "当前账户" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -4846,6 +4951,7 @@
       }
     },
     "拷贝版本 ID" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -5089,6 +5195,7 @@
 
     },
     "支持作者" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -6299,6 +6406,7 @@
       }
     },
     "正在下载" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7331,6 +7439,7 @@
       }
     },
     "清除" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -8309,6 +8418,7 @@
       }
     },
     "设为默认账户" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -9256,6 +9366,7 @@
       }
     },
     "选择 App Store 国家/地区" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -9496,6 +9607,7 @@
       }
     },
     "选择目录" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {

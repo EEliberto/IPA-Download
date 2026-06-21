@@ -46,6 +46,7 @@ async function runCommand(command, args) {
         if (!query.trim()) throw new Error(t('missing_query'));
         const result = await searchApps(query, {
             country: args.country || 'cn',
+            platform: args.platform || 'iphone',
             limit: Number(args.limit || 30),
         });
         printJSON(result);
@@ -54,13 +55,14 @@ async function runCommand(command, args) {
     case 'lookup': {
         const appId = args.id || args.appid || args.appId || '';
         if (!appId.trim()) throw new Error(t('missing_appid'));
-        const result = await lookupApp(appId, {country: args.country || 'cn'});
+        const result = await lookupApp(appId, {country: args.country || 'cn', platform: args.platform || 'iphone'});
         printJSON(result);
         return;
     }
     case 'featured': {
         const result = await featuredApps({
             country: args.country || 'cn',
+            platform: args.platform || 'iphone',
             limit: Number(args.limit || 30),
             offset: Number(args.offset || 0),
         });

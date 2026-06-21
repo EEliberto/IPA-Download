@@ -8,6 +8,13 @@ import SwiftUI
 
 private let appDisplayName = "Pastel"
 
+private func copyToPasteboard(_ string: String) {
+    let value = string.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(value, forType: .string)
+}
+
 private extension Notification.Name {
     static let pastelSelectAllRows = Notification.Name("PastelSelectAllRows")
     static let pastelRefreshActivePanel = Notification.Name("PastelRefreshActivePanel")
@@ -1392,9 +1399,17 @@ struct AppSearchResult: Decodable, Identifiable, Hashable {
     let trackViewUrl: String
     let currentVersionReleaseDate: String
     let source: String
+    let platform: String?
 
     var fileSizeText: String {
         formatByteString(fileSizeBytes)
+    }
+
+    var isVisionApp: Bool {
+        let normalizedPlatform = (platform ?? "").lowercased()
+        return normalizedPlatform.contains("vision")
+            || artworkUrl.lowercased().contains(".lsr/")
+            || trackViewUrl.lowercased().contains("/vision")
     }
 }
 
@@ -1439,6 +1454,8 @@ struct DownloadedItem: Identifiable, Hashable {
     let storefrontId: String
     let downloadDate: Date
     let removesAppStoreUpdates: Bool
+    let artworkUrl: String
+    let softwarePlatform: String
 
     var sizeText: String {
         guard sizeBytes > 0 else { return "—" }
@@ -1453,6 +1470,11 @@ struct DownloadedItem: Identifiable, Hashable {
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: downloadDate)
     }
+
+    var isVisionApp: Bool {
+        softwarePlatform.lowercased().contains("vision")
+            || artworkUrl.lowercased().contains(".lsr/")
+    }
 }
 
 struct DownloadedAppGroup: Identifiable {
@@ -1464,6 +1486,37 @@ struct DownloadedAppGroup: Identifiable {
     var appId: String { items.first?.appId ?? "" }
     var storefrontId: String { items.first?.storefrontId ?? "" }
     var iconPath: String { items.first?.id ?? "" }
+    var artworkUrl: String { items.first?.artworkUrl ?? "" }
+    var softwarePlatform: String { items.first?.softwarePlatform ?? "" }
+    var isVisionApp: Bool { items.first?.isVisionApp ?? false }
+}
+
+private enum AppSearchPlatform: String, CaseIterable, Identifiable {
+    case iphone
+    case ipad
+    case vision
+
+    var id: String { rawValue }
+
+    var symbolName: String {
+        switch self {
+        case .iphone: return "iphone"
+        case .ipad: return "ipad"
+        case .vision: return "vision.pro"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .iphone: return "iPhone"
+        case .ipad: return "iPad"
+        case .vision: return "Vision"
+        }
+    }
+
+    static func named(_ value: String) -> AppSearchPlatform {
+        allCases.first { $0.rawValue == value } ?? .iphone
+    }
 }
 
 private enum IPADownloadVariant: String {
@@ -1586,6 +1639,7 @@ private extension String {
 final class CatalogViewModel: ObservableObject {
     @Published var searchQuery = ""
     @Published var country = "cn"
+    @Published var platform = AppSearchPlatform.iphone.rawValue
     @Published var searchResults: [AppSearchResult] = []
     @Published var selectedSearchID: String?
     @Published var searchStatus = String(localized: "正在加载 App...")
@@ -1618,6 +1672,10 @@ final class CatalogViewModel: ObservableObject {
         return value.isEmpty ? "cn" : value
     }
 
+    private var cleanPlatform: String {
+        AppSearchPlatform.named(platform).rawValue
+    }
+
     private func nextSearchSequence() -> Int {
         searchSequence += 1
         return searchSequence
@@ -1631,6 +1689,7 @@ final class CatalogViewModel: ObservableObject {
         }
 
         let country = cleanCountry
+        let platform = cleanPlatform
         let sequence = nextSearchSequence()
         isSearching = true
         isShowingFeatured = false
@@ -1644,6 +1703,7 @@ final class CatalogViewModel: ObservableObject {
                     "main.js", "search",
                     "--query", query,
                     "--country", country,
+                    "--platform", platform,
                     "--limit", "30"
                 ])
                 let response = try JSONDecoder().decode(SearchResponse.self, from: data)
@@ -1661,6 +1721,7 @@ final class CatalogViewModel: ObservableObject {
 
     func loadFeatured() {
         let country = cleanCountry
+        let platform = cleanPlatform
         let sequence = nextSearchSequence()
         isSearching = true
         isLoadingMoreFeatured = false
@@ -1682,6 +1743,7 @@ final class CatalogViewModel: ObservableObject {
                     let data = try await NodeRuntime.runJSON(arguments: [
                         "main.js", "featured",
                         "--country", country,
+                        "--platform", platform,
                         "--limit", "\(featuredPageSize)",
                         "--offset", "0"
                     ], timeout: 15)
@@ -1710,6 +1772,7 @@ final class CatalogViewModel: ObservableObject {
         guard searchResults.suffix(6).contains(where: { $0.id == result.id }) else { return }
 
         let country = cleanCountry
+        let platform = cleanPlatform
         let sequence = searchSequence
         let offset = featuredOffset
         isLoadingMoreFeatured = true
@@ -1720,6 +1783,7 @@ final class CatalogViewModel: ObservableObject {
                 let data = try await NodeRuntime.runJSON(arguments: [
                     "main.js", "featured",
                     "--country", country,
+                    "--platform", platform,
                     "--limit", "\(featuredPageSize)",
                     "--offset", "\(offset)"
                 ])
@@ -1867,6 +1931,8 @@ struct ContentView: View {
     @State private var manualAppID = ""
     @State private var manualVersionID = ""
     @State private var manualNoUpdate = false
+    @State private var manualLatestDownloadedPath: String?
+    @State private var manualLatestDownloadedJobID: String?
     @State private var appleVersionFetchNeedsAcquisition = false
     @State private var storefrontReloadTask: Task<Void, Never>?
     @Namespace private var manualActionGlassNamespace
@@ -1877,6 +1943,7 @@ struct ContentView: View {
     @AppStorage("downloadVersionId") private var downloadVersionID = ""
     @AppStorage("downloadDir") private var downloadDir = ""
     @AppStorage("catalogCountry") private var selectedCountryCode = "cn"
+    @AppStorage("catalogSearchPlatform") private var selectedSearchPlatformID = AppSearchPlatform.iphone.rawValue
     @AppStorage(AppLanguage.overrideKey) private var languageOverride = ""
 
     private var versionListLoading: Bool {
@@ -2036,7 +2103,6 @@ struct ContentView: View {
                 .glassEffect(.regular.interactive(), in: Circle())
         }
         .buttonStyle(.plain)
-        .help(String(localized: "设置"))
     }
 
     private var toolbarSupportButton: some View {
@@ -2051,7 +2117,6 @@ struct ContentView: View {
                 .glassEffect(.regular.interactive(), in: Circle())
         }
         .buttonStyle(.plain)
-        .help(String(localized: "支持作者"))
     }
 
     private func showSettings() {
@@ -2217,7 +2282,7 @@ struct ContentView: View {
     }
 
     private var canDownloadManualVersion: Bool {
-        !manualAppIDTrimmed.isEmpty && !manualVersionIDTrimmed.isEmpty && !downloadDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !manualAppIDTrimmed.isEmpty && !downloadDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var manualDownloadVariant: IPADownloadVariant {
@@ -2225,7 +2290,8 @@ struct ContentView: View {
     }
 
     private var manualDownloadJobID: String {
-        "manual-\(manualAppIDTrimmed)-\(manualVersionIDTrimmed)-\(manualDownloadVariant.rawValue)"
+        let versionKey = manualVersionIDTrimmed.isEmpty ? "latest" : manualVersionIDTrimmed
+        return "manual-\(manualAppIDTrimmed)-\(versionKey)-\(manualDownloadVariant.rawValue)"
     }
 
     private var manualDownloadJob: DownloadManager.Job? {
@@ -2233,7 +2299,15 @@ struct ContentView: View {
     }
 
     private var manualDownloadedURL: URL? {
-        guard !manualVersionIDTrimmed.isEmpty else { return nil }
+        if manualVersionIDTrimmed.isEmpty {
+            guard manualLatestDownloadedJobID == manualDownloadJobID,
+                  let path = manualLatestDownloadedPath,
+                  FileManager.default.fileExists(atPath: path) else {
+                return nil
+            }
+            return URL(fileURLWithPath: path)
+        }
+
         return downloadedItems.first(where: { item in
             item.versionId == manualVersionIDTrimmed
                 && item.removesAppStoreUpdates == manualDownloadVariant.removesAppStoreUpdates
@@ -2274,7 +2348,7 @@ struct ContentView: View {
             .padding(.top, 12)
             .padding(.leading, 14)
             .padding(.trailing, 14)
-            .padding(.bottom, rightPanel == .download ? 0 : 12)
+            .padding(.bottom, 12)
         }
         .navigationSplitViewStyle(.balanced)
         .toolbar(removing: .sidebarToggle)
@@ -2432,8 +2506,8 @@ struct ContentView: View {
             .padding(.bottom, 34)
         }
         .safeAreaBar(edge: .top, spacing: 8) {
-            sidebarSearchControls
-                .padding(.horizontal, 18)
+            sidebarSearchPanel
+            .padding(.horizontal, 18)
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
         .contentMargins(.trailing, 0, for: .scrollIndicators)
@@ -2448,6 +2522,14 @@ struct ContentView: View {
         }
     }
 
+    private var sidebarSearchPanel: some View {
+        VStack(spacing: 10) {
+            sidebarSearchControls
+            sidebarPlatformPicker
+        }
+        .frame(maxWidth: .infinity)
+    }
+
     private var sidebarSearchControls: some View {
         HStack(spacing: 0) {
             sidebarCountryMenu
@@ -2455,7 +2537,7 @@ struct ContentView: View {
             Rectangle()
                 .fill(Color(nsColor: .separatorColor).opacity(0.32))
                 .frame(width: 1, height: 18)
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 8)
 
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .medium))
@@ -2485,7 +2567,6 @@ struct ContentView: View {
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(StablePressButtonStyle())
-                .help(String(localized: "清除"))
             }
 
         }
@@ -2500,6 +2581,57 @@ struct ContentView: View {
             Capsule()
                 .stroke(Color(nsColor: .separatorColor).opacity(0.18), lineWidth: 1)
         }
+    }
+
+    private var sidebarPlatformPicker: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(AppSearchPlatform.allCases.enumerated()), id: \.element.id) { index, platform in
+                let isSelected = selectedSearchPlatform == platform
+                Button {
+                    selectSearchPlatform(platform)
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: platform.symbolName)
+                            .font(.system(size: platform == .vision ? 13 : 14, weight: .semibold))
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 18, height: 18)
+
+                        Text(platform.title)
+                            .font(.callout)
+                            .lineLimit(1)
+                    }
+                    .frame(minWidth: 84, minHeight: 30)
+                    .padding(.horizontal, 10)
+                    .foregroundStyle(isSelected ? Color.white : Color.secondary)
+                    .background {
+                        if isSelected {
+                            Capsule()
+                                .fill(Color(nsColor: .selectedContentBackgroundColor))
+                        }
+                    }
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(StablePressButtonStyle())
+
+                if index < AppSearchPlatform.allCases.count - 1 {
+                    Rectangle()
+                        .fill(Color(nsColor: .separatorColor).opacity(0.24))
+                        .frame(width: 1, height: 18)
+                        .padding(.horizontal, 2)
+                        .opacity(isSelected || selectedSearchPlatform == AppSearchPlatform.allCases[index + 1] ? 0 : 1)
+                }
+            }
+        }
+        .padding(3)
+        .frame(height: 36)
+        .fixedSize(horizontal: true, vertical: false)
+        .glassEffect(.regular.tint(searchControlGlassTint).interactive(), in: Capsule())
+        .background(searchControlFill, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(Color(nsColor: .separatorColor).opacity(0.16), lineWidth: 1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var sidebarCountryMenu: some View {
@@ -2536,7 +2668,6 @@ struct ContentView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(String(localized: "选择 App Store 国家/地区"))
     }
 
     @ViewBuilder
@@ -2559,8 +2690,27 @@ struct ContentView: View {
                     .zIndex(1)
 
                 Group {
-                    if versionListLoading {
-                    centeredSpinner
+                    if visionHistoryNeedsAppleSource {
+                        VStack(spacing: 14) {
+                            largeEmptyState(
+                                systemImage: "vision.pro",
+                                title: String(localized: "Apple Vision Pro"),
+                                message: String(localized: "Apple Vision Pro 的 App 历史版本目前仅在 Apple 来源提供，其他来源并未收录。"),
+                                fills: false
+                            )
+
+                            Button {
+                                selectHistoryProvider("apple")
+                            } label: {
+                                Text(String(localized: "前往 Apple 来源获取"))
+                            }
+                            .buttonStyle(.glassProminent)
+                            .controlSize(.large)
+                            .disabled(catalog.isLoadingVersions)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if versionListLoading {
+                        centeredSpinner
                     } else if catalog.versionResults.isEmpty {
                         VStack(spacing: 14) {
                             if appleVersionFetchNeedsAcquisition {
@@ -2641,11 +2791,6 @@ struct ContentView: View {
                                             if showsBatchDownloadMenu(for: record) {
                                                 Button(String(localized: "全部下载")) {
                                                     downloadSelectedVersions()
-                                                }
-                                            } else {
-                                                Button(String(localized: "拷贝版本 ID")) {
-                                                    NSPasteboard.general.clearContents()
-                                                    NSPasteboard.general.setString(record.versionId, forType: .string)
                                                 }
                                             }
                                         }
@@ -2743,12 +2888,20 @@ struct ContentView: View {
             Capsule()
                 .fill(manualVersionFieldFill)
 
-            TextField(prompt, text: text)
-                .textFieldStyle(.plain)
-                .font(.caption)
-                .lineLimit(1)
-                .padding(.horizontal, 12)
-                .focused($activeField, equals: field)
+            HStack(spacing: 7) {
+                Text(prompt)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                TextField("", text: text)
+                    .textFieldStyle(.plain)
+                    .font(.caption.monospacedDigit())
+                    .lineLimit(1)
+                    .focused($activeField, equals: field)
+            }
+            .padding(.horizontal, 12)
 
             IBeamCursorRect()
                 .clipShape(Capsule())
@@ -2771,7 +2924,6 @@ struct ContentView: View {
             .toggleStyle(.switch)
             .controlSize(.small)
             .fixedSize()
-        .help(String(localized: "下载后不再显示 App Store 更新"))
     }
 
     private var manualActionSlot: some View {
@@ -2804,7 +2956,13 @@ struct ContentView: View {
                     if let url = manualDownloadedURL { airDrop(url) }
                 },
                 onDelete: {
-                    if let url = manualDownloadedURL { deleteDownloaded(url) }
+                    if let url = manualDownloadedURL {
+                        deleteDownloaded(url)
+                        if manualLatestDownloadedPath == url.path {
+                            manualLatestDownloadedPath = nil
+                            manualLatestDownloadedJobID = nil
+                        }
+                    }
                 }
             )
             .glassEffectID("manual-download-action", in: manualActionGlassNamespace)
@@ -2871,10 +3029,7 @@ struct ContentView: View {
                 Text(activeAppName)
                     .font(.title3.weight(.semibold))
                     .lineLimit(1)
-                Text(activeAppID.isEmpty ? String(localized: "未选择 App") : "App ID \(activeAppID)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                AppIDCopyLine(appID: activeAppID, fallback: String(localized: "未选择 App"))
             }
 
             Spacer(minLength: 12)
@@ -2886,7 +3041,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private func selectedAppHeaderIcon(size: CGFloat) -> some View {
-        let cornerRadius = size * 0.25
+        let cornerRadius = activeAppIsVision ? size * 0.5 : size * 0.25
         if let selectedApp, !selectedApp.artworkUrl.isEmpty {
             CachedRemoteAppIcon(urlString: selectedApp.artworkUrl,
                                 size: size,
@@ -2937,6 +3092,15 @@ struct ContentView: View {
         }
         appleVersionFetchNeedsAcquisition = false
         guard !activeAppID.isEmpty else { return }
+        if activeAppIsVision && provider != "apple" {
+            selectedVersion = nil
+            selectedVersionIDs.removeAll()
+            lastSelectedVersionID = nil
+            catalog.selectedVersionID = nil
+            catalog.versionResults = []
+            catalog.versionStatus = String(localized: "Apple Vision Pro 的 App 历史版本目前仅在 Apple 来源提供，其他来源并未收录。")
+            return
+        }
         if provider == "apple" {
             fetchVersionIDsFromApple()
         } else {
@@ -2984,7 +3148,6 @@ struct ContentView: View {
                             .symbolRenderingMode(.hierarchical)
                     }
                     .buttonStyle(.plain)
-                    .help(String(localized: "清除"))
                 }
             }
             .padding(.horizontal, 16)
@@ -3066,7 +3229,6 @@ struct ContentView: View {
             }
         }
         .buttonStyle(.plain)
-        .help(String(localized: "选择 App Store 国家/地区"))
     }
 
     private func selectCountry(_ country: AppStoreCountry) {
@@ -3187,11 +3349,6 @@ struct ContentView: View {
                                         Button(String(localized: "全部下载")) {
                                             downloadSelectedVersions()
                                         }
-                                    } else {
-                                        Button(String(localized: "拷贝版本 ID")) {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString(record.versionId, forType: .string)
-                                        }
                                     }
                                 }
                             }
@@ -3259,7 +3416,8 @@ struct ContentView: View {
                                 DownloadedAppSidebarRow(
                                     group: group,
                                     icon: versionIcons[group.iconPath],
-                                    isSelected: selectedDownloadedGroupIDs.contains(group.id)
+                                    isSelected: selectedDownloadedGroupIDs.contains(group.id),
+                                    remoteIconCache: $remoteAppIcons
                                 )
                             }
                             .buttonStyle(StablePressButtonStyle())
@@ -3333,7 +3491,6 @@ struct ContentView: View {
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(StablePressButtonStyle())
-                .help(String(localized: "清除"))
             }
         }
         .padding(.leading, 12)
@@ -3350,12 +3507,13 @@ struct ContentView: View {
     }
 
     private var downloadDetailPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
             if let group = selectedDownloadedGroup {
                 downloadedGroupHeader(group)
+                    .padding(.bottom, 10)
                     .zIndex(1)
 
-                ZStack(alignment: .bottom) {
+                VStack(spacing: 0) {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(Array(group.items.enumerated()), id: \.element.id) { index, item in
@@ -3364,6 +3522,7 @@ struct ContentView: View {
                                     icon: versionIcons[item.id],
                                     rowIndex: index,
                                     isSelected: selectedDownloadedItemIDs.contains(item.id),
+                                    remoteIconCache: $remoteAppIcons,
                                     onSelect: {
                                         handleDownloadedRowSelection(item)
                                     },
@@ -3377,9 +3536,8 @@ struct ContentView: View {
                                             deleteSelectedDownloadedItems()
                                         }
                                     } else {
-                                        Button(String(localized: "拷贝版本 ID")) {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString(item.versionId, forType: .string)
+                                        Button(String(localized: "删除"), role: .destructive) {
+                                            deleteDownloaded(item.fileURL)
                                         }
                                     }
                                 }
@@ -3392,13 +3550,15 @@ struct ContentView: View {
                     .safeAreaBar(edge: .top, spacing: 4) {
                         downloadedVersionsHeaderBar
                     }
-                    .contentMargins(.bottom, 50, for: .scrollContent)
+                    .contentMargins(.bottom, 6, for: .scrollContent)
                     .contentMargins(.trailing, 0, for: .scrollIndicators)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     downloadedVersionsFooterBar(count: group.items.count)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                historyMetadataBar
             } else {
                 largeEmptyState(
                     systemImage: "tray.and.arrow.down",
@@ -3407,26 +3567,27 @@ struct ContentView: View {
                         ? String(localized: "可在设置中选择保存目录。")
                         : String(localized: "下载完成后会显示在这里。")
                 )
+
+                historyMetadataBar
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.top, 10)
+        .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func downloadedGroupHeader(_ group: DownloadedAppGroup) -> some View {
         HStack(alignment: .center, spacing: 13) {
-            downloadedAppIcon(path: group.iconPath, size: 52)
+            downloadedAppIcon(path: group.iconPath, size: 52, artworkUrl: group.artworkUrl, isVisionApp: group.isVisionApp)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(group.appName.isEmpty ? String(localized: "未知 App") : group.appName)
                     .font(.title3.weight(.semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                Text(group.appId.isEmpty ? (group.developer.isEmpty ? group.bundleId : group.developer) : "App ID \(group.appId)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                AppIDCopyLine(
+                    appID: group.appId,
+                    fallback: group.developer.isEmpty ? group.bundleId : group.developer
+                )
             }
 
             Spacer(minLength: 12)
@@ -3605,7 +3766,7 @@ struct ContentView: View {
                     searchForApp(group)
                 } label: {
                     HStack(spacing: 13) {
-                        downloadedAppIcon(path: group.iconPath, size: 50)
+                        downloadedAppIcon(path: group.iconPath, size: 50, artworkUrl: group.artworkUrl, isVisionApp: group.isVisionApp)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(group.appName)
                                 .font(.headline)
@@ -3619,7 +3780,6 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(StablePressButtonStyle())
-                .help(String(localized: "在「搜索」里查看这个 App"))
 
                 Spacer(minLength: 8)
 
@@ -3663,7 +3823,7 @@ struct ContentView: View {
 
     private func downloadedVersionRow(_ item: DownloadedItem) -> some View {
         HStack(alignment: .center, spacing: 12) {
-            downloadedAppIcon(path: item.id, size: 34)
+            downloadedAppIcon(path: item.id, size: 34, artworkUrl: item.artworkUrl, isVisionApp: item.isVisionApp)
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
                     Text(item.version.isEmpty ? "—" : item.version)
@@ -3691,13 +3851,21 @@ struct ContentView: View {
         .padding(.vertical, 12)
     }
 
-    private func downloadedAppIcon(path: String, size: CGFloat) -> some View {
-        let cornerRadius = size * 0.25
-        return Group {
+    @ViewBuilder
+    private func downloadedAppIcon(path: String, size: CGFloat, artworkUrl: String = "", isVisionApp: Bool = false) -> some View {
+        let cornerRadius = isVisionApp ? size * 0.5 : size * 0.25
+        Group {
             if let icon = versionIcons[path] {
                 Image(nsImage: icon)
                     .resizable()
                     .interpolation(.high)
+            } else if !artworkUrl.isEmpty {
+                CachedRemoteAppIcon(
+                    urlString: artworkUrl,
+                    size: size,
+                    cornerRadius: cornerRadius,
+                    cache: $remoteAppIcons
+                )
             } else {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(.quaternary)
@@ -3786,15 +3954,18 @@ struct ContentView: View {
     private func largeEmptyState(systemImage: String, title: String, message: String, fills: Bool = true) -> some View {
         VStack(spacing: 12) {
             Image(systemName: systemImage)
-                .font(.largeTitle)
+                .font(.system(size: 34, weight: .regular))
                 .foregroundStyle(.secondary)
+                .frame(width: 48, height: 48)
             Text(title)
                 .font(.headline)
+                .frame(width: 520)
             Text(message)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
+                .frame(width: 620)
         }
         .frame(maxWidth: .infinity, maxHeight: fills ? .infinity : nil)
     }
@@ -3861,7 +4032,7 @@ struct ContentView: View {
             .disabled(catalog.isSearching)
         case .versions:
             Button {
-                catalog.loadVersions()
+                loadHistoryForActiveApp()
             } label: {
                 Label(String(localized: "查询"), systemImage: "clock.arrow.circlepath")
             }
@@ -3901,7 +4072,6 @@ struct ContentView: View {
                 TextField(String(localized: "地区"), text: $catalog.country)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 72)
-                    .help(String(localized: "App Store 地区，例如 cn、us、jp"))
             }
             .padding(20)
 
@@ -3981,7 +4151,7 @@ struct ContentView: View {
                 TextField("App ID", text: $catalog.historyAppID)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit {
-                        catalog.loadVersions()
+                        loadHistoryForActiveApp()
                     }
 
                 Picker(String(localized: "来源"), selection: $catalog.historyProvider) {
@@ -4019,10 +4189,6 @@ struct ContentView: View {
                                 .contextMenu {
                                     Button(String(localized: "填入下载")) {
                                         useVersion(record)
-                                    }
-                                    Button(String(localized: "拷贝版本 ID")) {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(record.versionId, forType: .string)
                                     }
                                 }
                         }
@@ -4211,7 +4377,6 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "folder")
                 }
-                .help(String(localized: "选择目录"))
                 .controlSize(.large)
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.capsule)
@@ -4264,6 +4429,10 @@ struct ContentView: View {
         manualVersionID = ""
         manualNoUpdate = false
         catalog.historyAppID = ""
+        catalog.platform = AppSearchPlatform.named(selectedSearchPlatformID).rawValue
+        if AppSearchPlatform.named(selectedSearchPlatformID) == .vision {
+            catalog.historyProvider = "apple"
+        }
 
         accountStore.load()
         let initialCountry = accountStore.selectedAccount?.countryCode ?? selectedCountryCode
@@ -4277,6 +4446,58 @@ struct ContentView: View {
             activeField = nil
             NSApp.keyWindow?.makeFirstResponder(nil)
         }
+    }
+
+    private var selectedSearchPlatform: AppSearchPlatform {
+        AppSearchPlatform.named(selectedSearchPlatformID)
+    }
+
+    private var activeAppIsVision: Bool {
+        selectedApp?.isVisionApp == true
+    }
+
+    private var visionHistoryNeedsAppleSource: Bool {
+        activeAppIsVision && catalog.historyProvider != "apple" && !activeAppID.isEmpty
+    }
+
+    private func selectSearchPlatform(_ platform: AppSearchPlatform) {
+        guard selectedSearchPlatform != platform else { return }
+        selectedSearchPlatformID = platform.rawValue
+        catalog.platform = platform.rawValue
+        clearActiveAppSelectionForPlatformChange()
+        if platform == .vision {
+            catalog.historyProvider = "apple"
+        } else if catalog.historyProvider == "apple" {
+            catalog.historyProvider = "auto"
+        }
+        activeField = nil
+        NSApp.keyWindow?.makeFirstResponder(nil)
+
+        if catalog.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            catalog.loadFeatured()
+        } else {
+            catalog.search()
+        }
+    }
+
+    private func clearActiveAppSelectionForPlatformChange() {
+        selectedApp = nil
+        selectedAppLocalIconPath = nil
+        selectedVersion = nil
+        selectedVersionIDs.removeAll()
+        lastSelectedVersionID = nil
+        appleVersionFetchNeedsAcquisition = false
+        downloadAppID = ""
+        downloadVersionID = ""
+        manualAppID = ""
+        manualVersionID = ""
+        manualNoUpdate = false
+        catalog.historyAppID = ""
+        catalog.selectedSearchID = nil
+        catalog.selectedVersionID = nil
+        catalog.searchResults = []
+        catalog.versionResults = []
+        catalog.versionStatus = String(localized: "输入 App ID 以查询历史版本。")
     }
 
     private func applyStorefrontCountry(_ code: String, reload: Bool) {
@@ -4302,6 +4523,11 @@ struct ContentView: View {
     private func searchForApp(_ group: DownloadedAppGroup) {
         let query = group.appId.isEmpty ? group.appName : group.appId
         guard !query.isEmpty else { return }
+        if group.isVisionApp {
+            selectedSearchPlatformID = AppSearchPlatform.vision.rawValue
+            catalog.platform = AppSearchPlatform.vision.rawValue
+            catalog.historyProvider = "apple"
+        }
         if let code = storefrontCountryCode(group.storefrontId) {
             selectedCountryCode = code
             catalog.country = code
@@ -4317,7 +4543,7 @@ struct ContentView: View {
         selectedVersionIDs.removeAll()
         lastSelectedVersionID = nil
         rightPanel = .search
-        catalog.loadVersions()
+        loadHistoryForActiveApp()
     }
 
     private func selectApp(_ result: AppSearchResult) {
@@ -4334,11 +4560,12 @@ struct ContentView: View {
         manualNoUpdate = false
         catalog.historyAppID = result.id
         rightPanel = .search
-        if catalog.historyProvider == "apple" {
-            fetchVersionIDsFromApple()
-        } else {
-            catalog.loadVersions()
+        if result.isVisionApp || selectedSearchPlatform == .vision {
+            selectedSearchPlatformID = AppSearchPlatform.vision.rawValue
+            catalog.platform = AppSearchPlatform.vision.rawValue
+            catalog.historyProvider = "apple"
         }
+        loadHistoryForActiveApp()
     }
 
     private func selectVersion(_ record: VersionRecord, updateSelection: Bool = true) {
@@ -4487,6 +4714,12 @@ struct ContentView: View {
         selectedDownloadedItemID = nil
         selectedDownloadedItemIDs.removeAll()
         lastSelectedDownloadedItemID = nil
+        if !group.appId.isEmpty {
+            manualAppID = group.appId
+            manualVersionID = ""
+            manualLatestDownloadedPath = nil
+            manualLatestDownloadedJobID = nil
+        }
 
         let modifiers = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let commandPressed = modifiers.contains(.command)
@@ -4689,8 +4922,11 @@ struct ContentView: View {
 
     private func downloadManualVersionID() {
         let appID = manualAppIDTrimmed
-        let vid = manualVersionID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !appID.isEmpty, !vid.isEmpty else { return }
+        let vid = manualVersionIDTrimmed
+        guard !appID.isEmpty else { return }
+        let variant = manualDownloadVariant
+        let jobID = manualDownloadJobID
+        let startedAt = Date()
         selectedVersion = nil
         selectedVersionIDs.removeAll()
         lastSelectedVersionID = nil
@@ -4702,7 +4938,44 @@ struct ContentView: View {
         downloadVersionID = vid
         catalog.historyAppID = appID
         catalog.selectedVersionID = nil
+        if vid.isEmpty {
+            manualLatestDownloadedPath = nil
+            manualLatestDownloadedJobID = jobID
+        }
         start(removeAppStoreUpdateMetadataOverride: manualNoUpdate)
+        if vid.isEmpty {
+            trackManualLatestDownload(jobID: jobID, appID: appID, variant: variant, startedAt: startedAt)
+        }
+    }
+
+    private func trackManualLatestDownload(jobID: String, appID: String, variant: IPADownloadVariant, startedAt: Date) {
+        Task { @MainActor in
+            for _ in 0..<1800 {
+                guard manualLatestDownloadedJobID == jobID else { return }
+                guard let job = downloads.job(jobID) else {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    continue
+                }
+
+                if job.status == .failed {
+                    return
+                }
+
+                if job.status == .done {
+                    for _ in 0..<30 {
+                        refreshDownloadedFiles()
+                        if let url = newestDownloadedURL(appID: appID, variant: variant, after: startedAt) {
+                            manualLatestDownloadedPath = url.path
+                            return
+                        }
+                        try? await Task.sleep(nanoseconds: 180_000_000)
+                    }
+                    return
+                }
+
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
     }
 
     private func parseFetchedVersionIDs(from log: String) {
@@ -4824,7 +5097,8 @@ struct ContentView: View {
             return DownloadedItem(id: path, fileURL: url, appName: name, developer: "", bundleId: "",
                                   appId: "", groupKey: name, version: filenameInfo.version, versionId: "", sizeBytes: size,
                                   appleAccount: "", storefrontId: "", downloadDate: date,
-                                  removesAppStoreUpdates: filenameInfo.variant.removesAppStoreUpdates)
+                                  removesAppStoreUpdates: filenameInfo.variant.removesAppStoreUpdates,
+                                  artworkUrl: "", softwarePlatform: "")
         }
 
         func str(_ key: String) -> String {
@@ -4853,7 +5127,9 @@ struct ContentView: View {
             appleAccount: str("appleId"),
             storefrontId: str("s"),
             downloadDate: date,
-            removesAppStoreUpdates: metadataInfo.removesAppStoreUpdates || filenameInfo.variant.removesAppStoreUpdates
+            removesAppStoreUpdates: metadataInfo.removesAppStoreUpdates || filenameInfo.variant.removesAppStoreUpdates,
+            artworkUrl: str("softwareIcon57x57URL"),
+            softwarePlatform: str("software-platform")
         )
     }
 
@@ -4945,6 +5221,18 @@ struct ContentView: View {
         }?.fileURL
     }
 
+    private func newestDownloadedURL(appID: String, variant: IPADownloadVariant, after startedAt: Date) -> URL? {
+        downloadedItems
+            .filter { item in
+                item.appId == appID
+                    && item.removesAppStoreUpdates == variant.removesAppStoreUpdates
+                    && item.downloadDate >= startedAt.addingTimeInterval(-2)
+            }
+            .sorted { $0.downloadDate > $1.downloadDate }
+            .first?
+            .fileURL
+    }
+
     private static func runUnzip(_ args: [String]) -> Data? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
@@ -5021,7 +5309,12 @@ struct ContentView: View {
         catalog.historyAppID = item.appId
         catalog.selectedSearchID = item.appId
         rightPanel = .search
-        catalog.loadVersions()
+        if item.isVisionApp {
+            selectedSearchPlatformID = AppSearchPlatform.vision.rawValue
+            catalog.platform = AppSearchPlatform.vision.rawValue
+            catalog.historyProvider = "apple"
+        }
+        loadHistoryForActiveApp()
     }
 
     private func openDownloadedGroupInSearch(_ group: DownloadedAppGroup) {
@@ -5038,7 +5331,12 @@ struct ContentView: View {
         catalog.historyAppID = group.appId
         catalog.selectedSearchID = group.appId
         rightPanel = .search
-        catalog.loadVersions()
+        if group.isVisionApp {
+            selectedSearchPlatformID = AppSearchPlatform.vision.rawValue
+            catalog.platform = AppSearchPlatform.vision.rawValue
+            catalog.historyProvider = "apple"
+        }
+        loadHistoryForActiveApp()
     }
 
     private func searchResult(from item: DownloadedItem) -> AppSearchResult {
@@ -5051,10 +5349,11 @@ struct ContentView: View {
             minimumOsVersion: "",
             price: "",
             fileSizeBytes: item.sizeBytes > 0 ? "\(item.sizeBytes)" : "",
-            artworkUrl: "",
+            artworkUrl: item.artworkUrl,
             trackViewUrl: "",
             currentVersionReleaseDate: "",
-            source: "downloaded"
+            source: "downloaded",
+            platform: item.softwarePlatform
         )
     }
 
@@ -5070,6 +5369,17 @@ struct ContentView: View {
         selectedVersion = nil
         selectedVersionIDs.removeAll()
         catalog.selectedVersionID = nil
+        if activeAppIsVision && catalog.historyProvider != "apple" {
+            selectedVersionIDs.removeAll()
+            lastSelectedVersionID = nil
+            catalog.versionResults = []
+            catalog.versionStatus = String(localized: "Apple Vision Pro 的 App 历史版本目前仅在 Apple 来源提供，其他来源并未收录。")
+            return
+        }
+        if catalog.historyProvider == "apple" || activeAppIsVision {
+            fetchVersionIDsFromApple()
+            return
+        }
         catalog.loadVersions()
     }
 
@@ -5122,10 +5432,6 @@ struct ContentView: View {
             rightPanel = .search
             return
         }
-        guard !cleanVersionID.isEmpty else {
-            rightPanel = .versions
-            return
-        }
         guard !cleanDir.isEmpty else {
             return
         }
@@ -5141,8 +5447,10 @@ struct ContentView: View {
             removeAppStoreUpdateMetadata: removeUpdateMetadata
         )
         let variant = IPADownloadVariant(removeAppStoreUpdateMetadata: removeUpdateMetadata)
-        let jobID = selectedVersion.map { downloadJobID(for: $0, removesAppStoreUpdates: removeUpdateMetadata) } ?? "manual-\(cleanAppID)-\(cleanVersionID)-\(variant.rawValue)"
-        let label = "\(activeAppName) \(selectedVersion?.version ?? cleanVersionID)\(removeUpdateMetadata ? " · 不再更新" : "")"
+        let manualVersionKey = cleanVersionID.isEmpty ? "latest" : cleanVersionID
+        let jobID = selectedVersion.map { downloadJobID(for: $0, removesAppStoreUpdates: removeUpdateMetadata) } ?? "manual-\(cleanAppID)-\(manualVersionKey)-\(variant.rawValue)"
+        let labelVersion = selectedVersion?.version ?? (cleanVersionID.isEmpty ? String(localized: "最新版本") : cleanVersionID)
+        let label = "\(activeAppName) \(labelVersion)\(removeUpdateMetadata ? " · 不再更新" : "")"
         downloads.start(id: jobID, label: label, config: config)
     }
 
@@ -5158,7 +5466,7 @@ struct ContentView: View {
 
         if openVersions {
             rightPanel = .versions
-            catalog.loadVersions()
+            loadHistoryForActiveApp()
         }
     }
 
@@ -5204,11 +5512,11 @@ struct SearchResultRow: View {
                         .resizable()
                         .scaledToFit()
                 } placeholder: {
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: iconCornerRadius)
                         .fill(.quaternary)
                 }
                 .frame(width: 36, height: 36)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius))
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(result.name.isEmpty ? result.id : result.name)
@@ -5240,6 +5548,10 @@ struct SearchResultRow: View {
                 .lineLimit(1)
         }
         .padding(.vertical, 7)
+    }
+
+    private var iconCornerRadius: CGFloat {
+        result.isVisionApp ? 18 : 8
     }
 }
 
@@ -5310,7 +5622,7 @@ struct AppSidebarRow: View {
     }
 
     private var iconShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: 8.5, style: .continuous)
+        RoundedRectangle(cornerRadius: result.isVisionApp ? 17 : 8.5, style: .continuous)
     }
 }
 
@@ -5318,6 +5630,7 @@ private struct DownloadedAppSidebarRow: View {
     let group: DownloadedAppGroup
     let icon: NSImage?
     let isSelected: Bool
+    @Binding var remoteIconCache: [String: NSImage]
     @State private var isHovered = false
     @Environment(\.colorScheme) private var colorScheme
 
@@ -5367,8 +5680,15 @@ private struct DownloadedAppSidebarRow: View {
                     .resizable()
                     .interpolation(.high)
                     .scaledToFill()
+            } else if !group.artworkUrl.isEmpty {
+                CachedRemoteAppIcon(
+                    urlString: group.artworkUrl,
+                    size: 34,
+                    cornerRadius: iconCornerRadius,
+                    cache: $remoteIconCache
+                )
             } else {
-                RoundedRectangle(cornerRadius: 8.5, style: .continuous)
+                RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
                     .fill(.quaternary)
                     .overlay {
                         Image(systemName: "app")
@@ -5378,13 +5698,17 @@ private struct DownloadedAppSidebarRow: View {
             }
         }
         .frame(width: 34, height: 34)
-        .clipShape(RoundedRectangle(cornerRadius: 8.5, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 8.5, style: .continuous)
+            RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
                 .strokeBorder(Color(nsColor: .separatorColor).opacity(0.14), lineWidth: 0.5)
         }
         .compositingGroup()
         .shadow(color: .black.opacity(0.13), radius: 4, x: 0, y: 2)
+    }
+
+    private var iconCornerRadius: CGFloat {
+        group.isVisionApp ? 17 : 8.5
     }
 }
 
@@ -5454,6 +5778,7 @@ private struct DownloadedVersionHistoryRow: View {
     let icon: NSImage?
     let rowIndex: Int
     let isSelected: Bool
+    @Binding var remoteIconCache: [String: NSImage]
     let onSelect: () -> Void
     let onReveal: () -> Void
     let onAirDrop: () -> Void
@@ -5476,10 +5801,7 @@ private struct DownloadedVersionHistoryRow: View {
                     .lineLimit(1)
                     .frame(width: columns.version, alignment: .leading)
 
-                Text(item.versionId.isEmpty ? "—" : item.versionId)
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(secondaryTextStyle)
-                    .lineLimit(1)
+                HoverCopyIDText(value: item.versionId, isVisible: isHovered, isSelected: isSelected)
                     .frame(width: columns.versionID, alignment: .leading)
 
                 Text(item.sizeText)
@@ -5533,8 +5855,15 @@ private struct DownloadedVersionHistoryRow: View {
                     .resizable()
                     .interpolation(.high)
                     .scaledToFill()
+            } else if !item.artworkUrl.isEmpty {
+                CachedRemoteAppIcon(
+                    urlString: item.artworkUrl,
+                    size: 24,
+                    cornerRadius: rowIconCornerRadius,
+                    cache: $remoteIconCache
+                )
             } else {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: rowIconCornerRadius, style: .continuous)
                     .fill(.quaternary)
                     .overlay {
                         Image(systemName: "app")
@@ -5544,14 +5873,18 @@ private struct DownloadedVersionHistoryRow: View {
             }
         }
         .frame(width: 24, height: 24)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: rowIconCornerRadius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: rowIconCornerRadius, style: .continuous)
                 .strokeBorder(Color(nsColor: .separatorColor).opacity(0.14), lineWidth: 0.5)
         }
         .frame(width: Self.iconColumnWidth, alignment: .center)
         .offset(x: -4)
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.22 : 0.12), radius: 4, x: 0, y: 2)
+    }
+
+    private var rowIconCornerRadius: CGFloat {
+        item.isVisionApp ? 12 : 6
     }
 
     private var rowFill: Color {
@@ -5697,7 +6030,6 @@ private struct AccountSelectionButton: View {
         }
         .buttonStyle(StablePressButtonStyle())
         .onHover { isHovered = $0 }
-        .help(isSelected ? String(localized: "当前账户") : String(localized: "切换到账户"))
     }
 }
 
@@ -5722,12 +6054,12 @@ private struct SettingsHoverIconButton: View {
         }
         .buttonStyle(StablePressButtonStyle())
         .onHover { isHovered = $0 }
-        .help(help)
     }
 }
 
 struct VersionResultRow: View {
     let record: VersionRecord
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -5735,9 +6067,8 @@ struct VersionResultRow: View {
                 .frame(width: 170, alignment: .leading)
                 .lineLimit(1)
 
-            Text(record.versionId)
+            HoverCopyIDText(value: record.versionId, isVisible: isHovered, isSelected: false)
                 .frame(width: 190, alignment: .leading)
-                .lineLimit(1)
 
             Text(record.size.isEmpty ? "-" : record.size)
                 .frame(width: 130, alignment: .leading)
@@ -5754,6 +6085,7 @@ struct VersionResultRow: View {
                 .frame(width: 82)
         }
         .padding(.vertical, 7)
+        .onHover { isHovered = $0 }
     }
 }
 
@@ -5846,7 +6178,7 @@ struct AppSearchTile: View {
     }
 
     private var iconShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: 12.5, style: .continuous)
+        RoundedRectangle(cornerRadius: result.isVisionApp ? 24 : 12.5, style: .continuous)
     }
 }
 
@@ -5862,11 +6194,11 @@ struct AppStoreSearchResultRow: View {
                     .resizable()
                     .scaledToFit()
             } placeholder: {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
                     .fill(.quaternary)
             }
             .frame(width: 64, height: 64)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous))
             .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
 
             Text("\(rank)")
@@ -5912,6 +6244,10 @@ struct AppStoreSearchResultRow: View {
                 .padding(.leading, 114)
         }
     }
+
+    private var iconCornerRadius: CGFloat {
+        result.isVisionApp ? 32 : 14
+    }
 }
 
 struct AppSelectionCard: View {
@@ -5926,11 +6262,11 @@ struct AppSelectionCard: View {
                         .resizable()
                         .scaledToFit()
                 } placeholder: {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
                         .fill(.quaternary)
                 }
                 .frame(width: 58, height: 58)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous))
                 .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
 
                 Spacer()
@@ -5972,6 +6308,10 @@ struct AppSelectionCard: View {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .stroke(isSelected ? Color.accentColor.opacity(0.55) : Color(nsColor: .separatorColor).opacity(0.25), lineWidth: isSelected ? 2 : 1)
         }
+    }
+
+    private var iconCornerRadius: CGFloat {
+        result.isVisionApp ? 29 : 14
     }
 }
 
@@ -6082,11 +6422,8 @@ struct VersionSelectionRow: View {
                     .lineLimit(1)
                     .frame(width: columns.version, alignment: .leading)
 
-                Text(record.versionId)
-                    .font(.callout.monospacedDigit())
+                HoverCopyIDText(value: record.versionId, isVisible: isHovered, isSelected: isSelected)
                     .frame(width: columns.versionID, alignment: .leading)
-                    .foregroundStyle(secondaryTextStyle)
-                    .lineLimit(1)
 
                 Text(record.size.isEmpty ? "-" : record.size)
                     .font(.callout)
@@ -6197,7 +6534,6 @@ struct VersionSelectionRow: View {
             .glassEffect(.regular.tint(isSelected ? Color.white.opacity(0.34) : nil).interactive(), in: Capsule())
             .glassEffectID("version-row-action", in: actionGlassNamespace)
             .glassEffectTransition(.matchedGeometry)
-            .help(String(localized: "下载此版本"))
         }
     }
 
@@ -6257,7 +6593,6 @@ private struct DownloadErrorIndicator: View {
         .buttonStyle(StablePressButtonStyle())
         .glassEffect(.regular.tint(Color.yellow.opacity(0.18)).interactive(), in: Capsule())
         .onHover { showingDetails = $0 }
-        .help(message)
         .popover(isPresented: $showingDetails, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 10) {
                 Label(String(localized: "下载失败"), systemImage: "exclamationmark.triangle.fill")
@@ -6296,7 +6631,87 @@ private struct RowActionButton<Content: View>: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
-        .help(help)
+    }
+}
+
+private struct AppIDCopyLine: View {
+    let appID: String
+    let fallback: String
+
+    var body: some View {
+        let trimmedAppID = appID.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        Group {
+            if trimmedAppID.isEmpty {
+                Text(fallback)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                HStack(spacing: 5) {
+                    Text("App ID \(trimmedAppID)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    CopyGlyphButton(value: trimmedAppID, isSelected: false)
+                }
+            }
+        }
+    }
+}
+
+private struct HoverCopyIDText: View {
+    let value: String
+    let isVisible: Bool
+    let isSelected: Bool
+    var font: Font = .callout.monospacedDigit()
+
+    var body: some View {
+        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        HStack(spacing: 5) {
+            Text(trimmedValue.isEmpty ? "—" : trimmedValue)
+                .font(font)
+                .foregroundStyle(isSelected ? Color.white.opacity(0.80) : Color.secondary)
+                .lineLimit(1)
+                .textSelection(.disabled)
+
+            if isVisible && !trimmedValue.isEmpty {
+                CopyGlyphButton(value: trimmedValue, isSelected: isSelected)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isVisible)
+    }
+}
+
+private struct CopyGlyphButton: View {
+    let value: String
+    let isSelected: Bool
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            copyToPasteboard(value)
+            copied = true
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_400_000_000)
+                copied = false
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "document.on.document")
+                .font(.system(size: 11.5, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .frame(width: 18, height: 18)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(buttonTint)
+    }
+
+    private var buttonTint: Color {
+        isSelected ? Color.white.opacity(0.78) : Color.secondary
     }
 }
 
@@ -6338,7 +6753,6 @@ private struct FileActionButton: View {
         }
         .buttonStyle(StablePressButtonStyle())
         .onHover { isHovered = $0 }
-        .help(help)
     }
 }
 
@@ -6471,7 +6885,6 @@ private struct DownloadProgressPill: View {
         .frame(width: 58, height: 26)
         .clipShape(Capsule())
         .glassEffect(.regular.tint(Color.accentColor.opacity(0.12)).interactive(), in: Capsule())
-        .help(progress == nil && !isPackaging ? String(localized: "正在下载") : String(localized: "下载进度 \(progressText)"))
     }
 
     @ViewBuilder
@@ -6894,7 +7307,6 @@ private struct SettingsAccountActionButton: View {
                 isHovered = hovering
             }
         }
-        .help(help)
     }
 }
 
@@ -6938,7 +7350,6 @@ struct AccountSettingsView: View {
                     }
                     .buttonStyle(StablePressButtonStyle())
                     .glassEffect(.regular.interactive(), in: Circle())
-                    .help(String(localized: "添加 Apple 账户"))
 
                     Spacer(minLength: 0)
                 }
@@ -7047,7 +7458,6 @@ private struct SettingsDeviceGUIDRow: View {
                     .frame(width: 18, height: 18)
             }
             .buttonStyle(.borderless)
-            .help(copied ? String(localized: "已复制") : String(localized: "复制 Device GUID"))
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
@@ -7098,7 +7508,6 @@ struct AccountSettingsRow: View {
         .padding(.vertical, 5)
         .frame(minHeight: 38)
         .background(isSelected ? Color(nsColor: .selectedContentBackgroundColor) : Color.clear)
-        .help(isSelected ? String(localized: "当前使用") : String(localized: "设为默认账户"))
     }
 }
 
@@ -7415,7 +7824,7 @@ struct LanguageSettingsView: View {
 struct AboutSettingsView: View {
     @EnvironmentObject private var updateManager: AppUpdateManager
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "26.6.1"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "26.7"
     }
     private let thirdParty: [(String, String)] = [
         ("axios", "https://www.npmjs.com/package/axios"),
