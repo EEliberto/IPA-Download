@@ -3,6 +3,40 @@
     <channel>
         <title>Pastel</title>
         <item>
+            <title>26.7.1</title>
+            <pubDate>Mon, 27 Jul 2026 16:12:00 +0800</pubDate>
+            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel10</link>
+            <sparkle:version>10</sparkle:version>
+            <sparkle:shortVersionString>26.7.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[## 简体中文
+
+修复了一些已知问题。
+
+## 繁體中文
+
+修復了一些已知問題。
+
+## English
+
+Fixed several known issues.
+
+## 日本語
+
+いくつかの既知の問題を修正しました。
+
+## 한국어
+
+알려진 문제를 일부 수정했습니다.
+
+## ภาษาไทย
+
+แก้ไขปัญหาที่ทราบบางรายการ
+]]></description>
+            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel10/Pastel-26.7.1-build-10.dmg" length="53879378" type="application/octet-stream" sparkle:edSignature="u7L+CcjXviiMCWStvCsmzQX8FJBoA5j8m0NUtp60erst4Qg4Y5cCA8sqkI4Bx/edtjo6lYnO1EDLwWPLcUEJDw=="/>
+        </item>
+        <item>
             <title>26.7</title>
             <pubDate>Mon, 22 Jun 2026 09:26:46 +0800</pubDate>
             <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel9</link>
