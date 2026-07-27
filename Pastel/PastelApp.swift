@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CryptoKit
+import Darwin
 import ObjectiveC
 import Security
 import Sparkle
@@ -950,6 +951,18 @@ private func cleanDownloadErrorDetail(_ line: String) -> String? {
     return value.isEmpty ? nil : value
 }
 
+private func nodeQueryErrorMessage(_ error: Error) -> String {
+    let message = error.localizedDescription.lowercased()
+    if message.contains("network")
+        || message.contains("timed out")
+        || message.contains("timeout")
+        || message.contains("unable to connect")
+        || message.contains("could not connect") {
+        return String(localized: "无法连接 Apple 服务器。请检查网络连接后再试。")
+    }
+    return String(localized: "Node 查询失败。")
+}
+
 enum JobStatus: Equatable {
     case running, done, failed
 
@@ -1782,7 +1795,7 @@ final class CatalogViewModel: ObservableObject {
             } catch {
                 guard sequence == searchSequence else { return }
                 searchResults = []
-                searchStatus = String(localized: "搜索失败：\(error.localizedDescription)")
+                searchStatus = String(localized: "搜索失败：\(nodeQueryErrorMessage(error))")
             }
             isSearching = false
         }
@@ -1831,7 +1844,8 @@ final class CatalogViewModel: ObservableObject {
             }
             searchResults = []
             canLoadMoreFeatured = false
-            searchStatus = String(localized: "App 列表加载失败：\(lastError?.localizedDescription ?? "")")
+            let detail = lastError.map(nodeQueryErrorMessage) ?? String(localized: "Node 查询失败。")
+            searchStatus = String(localized: "App 列表加载失败：\(detail)")
             isSearching = false
         }
     }
@@ -1866,7 +1880,7 @@ final class CatalogViewModel: ObservableObject {
             } catch {
                 guard sequence == searchSequence else { return }
                 canLoadMoreFeatured = false
-                searchStatus = String(localized: "加载更多失败：\(error.localizedDescription)")
+                searchStatus = String(localized: "加载更多失败：\(nodeQueryErrorMessage(error))")
             }
             isLoadingMoreFeatured = false
         }
@@ -1902,7 +1916,7 @@ final class CatalogViewModel: ObservableObject {
                 }
             } catch {
                 versionResults = []
-                versionStatus = String(localized: "查询失败：\(error.localizedDescription)")
+                versionStatus = String(localized: "查询失败：\(nodeQueryErrorMessage(error))")
             }
             isLoadingVersions = false
         }
@@ -2005,6 +2019,8 @@ struct ContentView: View {
     @State private var manualLatestDownloadedJobID: String?
     @State private var appleVersionFetchNeedsAcquisition = false
     @State private var storefrontReloadTask: Task<Void, Never>?
+    @State private var downloadLibraryRefreshTask: Task<Void, Never>?
+    @State private var iconPathsBeingLoaded: Set<String> = []
     @Namespace private var manualActionGlassNamespace
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var activeField: ActiveField?
@@ -2175,7 +2191,7 @@ struct ContentView: View {
                 .font(.system(size: 15, weight: .regular))
                 .frame(width: 35, height: 35)
                 .contentShape(Circle())
-                .glassEffect(.regular.interactive(), in: Circle())
+                .glassEffect(.regular, in: Circle())
         }
         .buttonStyle(.plain)
     }
@@ -2189,7 +2205,7 @@ struct ContentView: View {
                 .foregroundStyle(.red)
                 .frame(width: 35, height: 35)
                 .contentShape(Circle())
-                .glassEffect(.regular.interactive(), in: Circle())
+                .glassEffect(.regular, in: Circle())
         }
         .buttonStyle(.plain)
     }
@@ -2260,7 +2276,7 @@ struct ContentView: View {
                 Capsule()
                     .stroke(modeBarStroke, lineWidth: 1)
             }
-            .glassEffect(.regular.tint(modeBarGlassTint).interactive(), in: Capsule())
+            .glassEffect(.regular.tint(modeBarGlassTint), in: Capsule())
         }
     }
 
@@ -4054,13 +4070,15 @@ struct ContentView: View {
                 .frame(width: 48, height: 48)
             Text(title)
                 .font(.headline)
-                .frame(width: 520)
+                .frame(maxWidth: 520)
             Text(message)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .lineLimit(4)
+                .truncationMode(.tail)
                 .padding(.horizontal, 40)
-                .frame(width: 620)
+                .frame(maxWidth: 620)
         }
         .frame(maxWidth: .infinity, maxHeight: fills ? .infinity : nil)
     }
@@ -4537,10 +4555,6 @@ struct ContentView: View {
             catalog.loadFeatured()
         }
 
-        DispatchQueue.main.async {
-            activeField = nil
-            NSApp.keyWindow?.makeFirstResponder(nil)
-        }
     }
 
     private var selectedSearchPlatform: AppSearchPlatform {
@@ -5110,70 +5124,111 @@ struct ContentView: View {
 
     private func refreshDownloadedFiles() {
         let dirPath = downloadDir.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !dirPath.isEmpty else { downloadedFiles = [:]; return }
-        let dirURL = URL(fileURLWithPath: (dirPath as NSString).expandingTildeInPath, isDirectory: true)
-        let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: [.isRegularFileKey]) else {
+        downloadLibraryRefreshTask?.cancel()
+        guard !dirPath.isEmpty else {
             downloadedFiles = [:]
-            return
-        }
-        var map: [String: URL] = [:]
-        for url in items where url.pathExtension.lowercased() == "ipa" {
-            let stem = url.deletingPathExtension().lastPathComponent
-            let parsed = Self.filenameVersionAndVariant(from: stem)
-            if !parsed.version.isEmpty {
-                map[downloadedFileKey(parsed.version, variant: parsed.variant)] = url
-            }
-        }
-        downloadedFiles = map
-        let livePaths = Set(map.values.map { $0.path })
-        versionIcons = versionIcons.filter { livePaths.contains($0.key) }
-        downloadedVersionIDs = downloadedVersionIDs.filter { livePaths.contains($0.value.path) }
-        for url in map.values where versionIcons[url.path] == nil {
-            loadAppIcon(from: url)
-        }
-        refreshDownloadLibrary()
-    }
-
-    private func refreshDownloadLibrary() {
-        let dirPath = downloadDir.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !dirPath.isEmpty else { downloadedItems = []; return }
-        let dirURL = URL(fileURLWithPath: (dirPath as NSString).expandingTildeInPath, isDirectory: true)
-        let fm = FileManager.default
-        guard let urls = try? fm.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: [.fileSizeKey, .creationDateKey, .contentModificationDateKey]) else {
             downloadedItems = []
             return
         }
-        let ipaURLs = urls.filter { $0.pathExtension.lowercased() == "ipa" }
 
-        for url in ipaURLs where versionIcons[url.path] == nil {
-            loadAppIcon(from: url)
-        }
+        let dirURL = URL(fileURLWithPath: (dirPath as NSString).expandingTildeInPath, isDirectory: true)
+        downloadLibraryRefreshTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 180_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let extracted = ipaURLs.compactMap { Self.extractDownloadedItem(fromIPA: $0) }
-            DispatchQueue.main.async {
-                downloadedItems = extracted
-                let validDownloadedIDs = Set(extracted.map(\.id))
-                let validDownloadedGroupIDs = Set(extracted.map(\.groupKey))
-                selectedDownloadedItemIDs.formIntersection(validDownloadedIDs)
-                selectedDownloadedGroupIDs.formIntersection(validDownloadedGroupIDs)
-                if let selectedDownloadedItemID,
-                   !extracted.contains(where: { $0.id == selectedDownloadedItemID }) {
-                    self.selectedDownloadedItemID = nil
-                }
-                if let lastSelectedDownloadedGroupID,
-                   !validDownloadedGroupIDs.contains(lastSelectedDownloadedGroupID) {
-                    self.lastSelectedDownloadedGroupID = nil
-                }
-                if let selectedDownloadedGroupID,
-                   !validDownloadedGroupIDs.contains(selectedDownloadedGroupID) {
-                    self.selectedDownloadedGroupID = self.firstSelectedDownloadedGroupID()
-                    selectedDownloadedItemIDs.removeAll()
-                    lastSelectedDownloadedItemID = nil
-                }
+            let worker = Task.detached(priority: .utility) {
+                Self.scanDownloadLibrary(at: dirURL)
+            }
+            let snapshot = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+
+            guard !Task.isCancelled,
+                  downloadDir.trimmingCharacters(in: .whitespacesAndNewlines) == dirPath,
+                  let snapshot
+            else { return }
+
+            downloadedFiles = snapshot.filesByVersion
+            downloadedItems = snapshot.items
+
+            let livePaths = Set(snapshot.filesByVersion.values.map(\.path))
+            versionIcons = versionIcons.filter { livePaths.contains($0.key) }
+            downloadedVersionIDs = downloadedVersionIDs.filter { livePaths.contains($0.value.path) }
+            iconPathsBeingLoaded.formIntersection(livePaths)
+
+            for url in snapshot.locallyAvailableURLs where versionIcons[url.path] == nil {
+                loadAppIcon(from: url)
+            }
+
+            let validDownloadedIDs = Set(snapshot.items.map(\.id))
+            let validDownloadedGroupIDs = Set(snapshot.items.map(\.groupKey))
+            selectedDownloadedItemIDs.formIntersection(validDownloadedIDs)
+            selectedDownloadedGroupIDs.formIntersection(validDownloadedGroupIDs)
+            if let selectedDownloadedItemID,
+               !validDownloadedIDs.contains(selectedDownloadedItemID) {
+                self.selectedDownloadedItemID = nil
+            }
+            if let lastSelectedDownloadedGroupID,
+               !validDownloadedGroupIDs.contains(lastSelectedDownloadedGroupID) {
+                self.lastSelectedDownloadedGroupID = nil
+            }
+            if let selectedDownloadedGroupID,
+               !validDownloadedGroupIDs.contains(selectedDownloadedGroupID) {
+                self.selectedDownloadedGroupID = self.firstSelectedDownloadedGroupID()
+                selectedDownloadedItemIDs.removeAll()
+                lastSelectedDownloadedItemID = nil
             }
         }
+    }
+
+    private struct DownloadLibrarySnapshot {
+        let filesByVersion: [String: URL]
+        let items: [DownloadedItem]
+        let locallyAvailableURLs: [URL]
+    }
+
+    private static func scanDownloadLibrary(at dirURL: URL) -> DownloadLibrarySnapshot? {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: dirURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return DownloadLibrarySnapshot(filesByVersion: [:], items: [], locallyAvailableURLs: [])
+        }
+
+        let ipaURLs = urls.filter { $0.pathExtension.lowercased() == "ipa" }
+        var filesByVersion: [String: URL] = [:]
+        var items: [DownloadedItem] = []
+        var locallyAvailableURLs: [URL] = []
+
+        for url in ipaURLs {
+            guard !Task.isCancelled else { return nil }
+
+            let stem = url.deletingPathExtension().lastPathComponent
+            let parsed = filenameVersionAndVariant(from: stem)
+            if !parsed.version.isEmpty {
+                filesByVersion[downloadedFileKey(parsed.version, variant: parsed.variant)] = url
+            }
+
+            if isFileMaterialized(at: url.path) {
+                locallyAvailableURLs.append(url)
+            }
+            if let item = extractDownloadedItem(fromIPA: url) {
+                items.append(item)
+            }
+        }
+
+        return DownloadLibrarySnapshot(
+            filesByVersion: filesByVersion,
+            items: items,
+            locallyAvailableURLs: locallyAvailableURLs
+        )
     }
 
     private static func extractDownloadedItem(fromIPA url: URL) -> DownloadedItem? {
@@ -5276,10 +5331,15 @@ struct ContentView: View {
 
     private func loadAppIcon(from ipaURL: URL) {
         let path = ipaURL.path
+        guard Self.isFileMaterialized(at: path),
+              iconPathsBeingLoaded.insert(path).inserted
+        else { return }
+
         DispatchQueue.global(qos: .utility).async {
             let image = Self.extractAppIcon(fromIPA: path)
             let metadata = Self.extractVersionMetadata(fromIPA: path)
             DispatchQueue.main.async {
+                iconPathsBeingLoaded.remove(path)
                 if let image { versionIcons[path] = image }
                 if let versionID = metadata.versionID {
                     downloadedVersionIDs[downloadedFileKey(versionID, variant: metadata.variant)] = ipaURL
@@ -5341,7 +5401,14 @@ struct ContentView: View {
         return data.isEmpty ? nil : data
     }
 
+    private static func isFileMaterialized(at path: String) -> Bool {
+        var fileInfo = stat()
+        guard lstat(path, &fileInfo) == 0 else { return false }
+        return (fileInfo.st_flags & UInt32(SF_DATALESS)) == 0
+    }
+
     private static func downloadedMetadata(fromIPA path: String) -> (data: Data?, removesAppStoreUpdates: Bool) {
+        guard isFileMaterialized(at: path) else { return (nil, false) }
         if let data = runUnzip(["-p", path, "iTunesMetadata.plist"]) {
             return (data, false)
         }
