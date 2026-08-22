@@ -22,7 +22,8 @@ function needs2faError() {
 const CURL = '/usr/bin/curl';
 const SCUTIL = '/usr/sbin/scutil';
 const GSA_ENDPOINT = 'https://gsa.apple.com/grandslam/GsService2';
-const DEFAULT_NATIVE_AUTH_URL = 'https://auth.itunes.apple.com/auth/v1/native/fast';
+const STORE_AUTH_URL = 'https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate';
+const DEFAULT_NATIVE_AUTH_URL = 'https://auth.itunes.apple.com/auth/v1/native/fast/';
 // 多个公共 anisette 服务器做兜底（取自 SideStore 官方推荐列表）；单个挂了就换下一个。
 // 可用 ANISETTE_SERVER 环境变量在最前面插入自定义服务器。
 const ANISETTE_SERVERS = [
@@ -61,7 +62,6 @@ export function cleanup() {
 }
 
 function systemProxy() {
-    if (process.env.IPA_BYPASS_SYSTEM_PROXY === '1') return '';
     try {
         const out = execFileSync(SCUTIL, ['--proxy'], {timeout: 5000}).toString();
         const httpsOn = /HTTPSEnable\s*:\s*1/.test(out);
@@ -76,38 +76,17 @@ export const STORE_USER_AGENT = STORE_UA;
 
 // 通用 curl 请求；headers 为 {k:v}，返回 {status, headers, body}
 // jar：cookie 文件路径，传入则读写 cookie（authenticate 与后续下载/购买共享会话）。
-export function curlRequest(method, url, {headers = {}, body = null, follow = false, timeout = 30, jar = null, http2 = false} = {}) {
+export function curlRequest(method, url, {headers = {}, body = null, follow = false, timeout = 30, jar = null} = {}) {
     const dir = tmpDir();
     const outFile = path.join(dir, `out-${crypto.randomBytes(4).toString('hex')}.bin`);
     const hdrFile = path.join(dir, 'hdr.txt');
-    // Apple 的旧式 StoreServices plist 接口在 HTTP/2 下偶尔返回 403 且 body 为空。
-    // AssppWeb 当前实现同样固定使用 HTTP/1.1。
-    const args = ['-s', http2 ? '--http2' : '--http1.1', '-m', String(timeout), '-X', method, url,
+    const args = ['-s', '-m', String(timeout), '-X', method, url,
         '-o', outFile, '-D', hdrFile, '-w', '%{http_code}'];
     if (jar) args.push('-b', jar, '-c', jar);
     if (follow) args.push('-L', '--post302');
-    let isAppleEndpoint = false;
-    try {
-        const hostname = new URL(url).hostname.toLowerCase();
-        isAppleEndpoint = hostname === 'apple.com' || hostname.endsWith('.apple.com');
-    } catch { /* keep normal proxy behavior for malformed/non-URL input */ }
-    // Local proxy applications can keep HTTPS_PROXY injected even after the
-    // user switches networks. Apple's commerce edge rejects those tunneled
-    // requests intermittently (empty 301/403/503), while direct GSA/PDP/Store
-    // requests succeed. Allow an explicit opt-in for environments that truly
-    // require an Apple proxy.
-    const bypassProxy = process.env.IPA_BYPASS_SYSTEM_PROXY === '1'
-        || (isAppleEndpoint && process.env.IPA_ALLOW_APPLE_PROXY !== '1');
-    if (bypassProxy) {
-        args.push('--noproxy', '*');
-    } else {
-        const proxy = systemProxy();
-        if (proxy) args.push('--proxy', proxy);
-    }
-    for (const [k, rawValue] of Object.entries(headers)) {
-        const values = Array.isArray(rawValue) ? rawValue : [rawValue];
-        for (const value of values) args.push('-H', `${k}: ${value}`);
-    }
+    const proxy = systemProxy();
+    if (proxy) args.push('--proxy', proxy);
+    for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
     if (body !== null) {
         const bodyFile = path.join(dir, 'body.bin');
         writeFileSync(bodyFile, body);
@@ -122,10 +101,8 @@ export function curlRequest(method, url, {headers = {}, body = null, follow = fa
 }
 
 function headerValue(rawHeaders, name) {
-    // curl may append several header blocks (proxy CONNECT / redirects). The
-    // final matching value belongs to the response returned to the caller.
-    const matches = [...rawHeaders.matchAll(new RegExp(`^${name}:\\s*(.+)$`, 'gim'))];
-    return matches.length ? matches.at(-1)[1].trim() : '';
+    const m = rawHeaders.match(new RegExp(`^${name}:\\s*(.+)$`, 'im'));
+    return m ? m[1].trim() : '';
 }
 
 function podPrefix(pod) {
@@ -134,50 +111,6 @@ function podPrefix(pod) {
 
 function storeAuthURL(guid, pod = '') {
     return `https://${podPrefix(pod)}buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate?guid=${encodeURIComponent(guid)}`;
-}
-
-const LEGACY_STORE_AUTH_URL = 'https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate';
-
-function storeAuthCandidates(guid) {
-    const dynamic = nativeAuthURL(fetchNativeAuthEndpoint(guid), guid);
-    const native = nativeAuthURL(DEFAULT_NATIVE_AUTH_URL, guid);
-    // Apple changes which endpoint accepts authentication by edge/account. The
-    // bag can temporarily advertise legacy MZFinance even while /native/fast/
-    // remains the working endpoint, so keep both explicit candidates.
-    return [...new Set([native, dynamic, LEGACY_STORE_AUTH_URL, storeAuthURL(guid)])];
-}
-
-function postStoreAuth(url, headers, body, jar) {
-    let endpoint = url;
-    let res = null;
-    // A Store pod is assigned with 301/302. Re-POST the exact plist body;
-    // automatic redirect handling may otherwise convert the request to GET.
-    for (let redirectCount = 0; redirectCount < 4; redirectCount++) {
-        res = curlRequest('POST', endpoint, {headers, body, follow: false, timeout: 30, jar});
-        if (res.status < 300 || res.status >= 400) return res;
-        const location = headerValue(res.headers, 'location');
-        if (!location) return res;
-        endpoint = new URL(location, endpoint).toString();
-    }
-    return res;
-}
-
-function storeAuthRejected(res) {
-    const status = res?.status || 0;
-    const e = new Error(t('store_http_rejected', {status}));
-    e.code = 'STORE_HTTP_REJECTED';
-    return e;
-}
-
-function shouldFallbackStoreAuth(res) {
-    const status = Number(res?.status || 0);
-    const text = res?.body?.toString('utf8').trimStart().toLowerCase() || '';
-    return !res?.body?.length
-        || status < 200
-        || status >= 300
-        || text.startsWith('<!doctype html')
-        || text.startsWith('<html')
-        || [204, 403, 404, 503].includes(status);
 }
 
 function nativeAuthURL(endpoint, guid) {
@@ -192,9 +125,7 @@ function normalizeAuthEndpoint(raw) {
         if (url.hostname === 'auth.itunes.apple.com') {
             let pathname = url.pathname.replace(/\/+$/, '');
             if (!pathname.endsWith('/fast')) pathname += '/fast';
-            // As of August 2026 Apple's native auth edge accepts /fast and
-            // rejects /fast/ with 301/403. Keep the canonical path slashless.
-            url.pathname = pathname;
+            url.pathname = `${pathname}/`;
         }
         return url.toString();
     } catch {
@@ -243,29 +174,10 @@ export function parsePlistLoose(buf, context = t('ctx_apple_resp')) {
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-function debugAuthenticationShape(spd, status) {
-    if (process.env.IPA_DEBUG_AUTH !== '1') return;
-    const safeParameters = {};
-    const visit = (value, path = '') => {
-        if (!value || typeof value !== 'object' || Buffer.isBuffer(value)) return;
-        for (const [key, child] of Object.entries(value)) {
-            const childPath = path ? `${path}.${key}` : key;
-            if (/pdp|srp|password.?version|iteration|salt|protocol/i.test(key)
-                && ['string', 'number', 'boolean'].includes(typeof child)) {
-                safeParameters[childPath] = child;
-            } else if (child && typeof child === 'object') {
-                visit(child, childPath);
-            }
-        }
-    };
-    visit(spd);
-    console.error(`[auth:shape] spdKeys=${Object.keys(spd || {}).sort().join(',')} statusKeys=${Object.keys(status || {}).sort().join(',')} tokenIDs=${Object.keys(spd?.t || {}).sort().join(',')} parameters=${JSON.stringify(safeParameters)}`);
-}
-
 // 取 anisette 设备标识：遍历所有服务器，全部失败再整体重试一遍（公共服务器经常临时 5xx）。
 async function fetchAnisette() {
     let lastErr = null;
-    for (let pass = 0; pass < 6; pass++) {
+    for (let pass = 0; pass < 2; pass++) {
         for (const server of ANISETTE_SERVERS) {
             try {
                 const {status, body} = curlRequest('GET', server, {timeout: 12});
@@ -291,15 +203,7 @@ function cpdFromAnisette(ani) {
         'X-Apple-I-TimeZone': ani['X-Apple-I-TimeZone'],
         'X-Apple-Locale': ani['X-Apple-Locale'],
         'X-Mme-Device-Id': ani['X-Mme-Device-Id'],
-        bootstrap: true,
-        capp: 'itunesstored',
-        ckgen: true,
-        icscrec: true,
-        loc: 'en_GB',
-        papp: 'com.apple.AppStore',
-        pbe: false,
-        prkgen: true,
-        svct: 'iTunes',
+        bootstrap: true, icscrec: true, loc: 'en_GB', pbe: false, prkgen: true, svct: 'iCloud',
     };
 }
 
@@ -315,10 +219,6 @@ function gsaPost(bodyObj, ani) {
     let lastStatus = 0;
     for (let attempt = 0; attempt < 3; attempt++) {
         const {status, body: respBody} = curlRequest('POST', GSA_ENDPOINT, {headers, body, timeout: 30});
-        if (process.env.IPA_DEBUG_AUTH === '1') {
-            const firstTag = (respBody.toString('utf8').match(/<([A-Za-z][A-Za-z0-9:-]*)\b/) || [])[1] || '';
-            console.error(`[auth:gsa] operation=${bodyObj?.Request?.o || 'unknown'} status=${status} bytes=${respBody.length} firstTag=${firstTag}`);
-        }
         if (status === 200) {
             const parsed = parsePlistLoose(respBody, t('ctx_gsa_resp'));
             return parsed.Response || parsed;
@@ -396,57 +296,6 @@ function build2faHeaders(ani, adsid, gsToken) {
     };
 }
 
-function encodedAccountToken(adsid, token) {
-    return Buffer.from(`${adsid}:${token}`).toString('base64');
-}
-
-function performPDPIntermission(password, ani, spd) {
-    const adsid = String(spd?.adsid || '');
-    const dsid = String(spd?.DsPrsId || '');
-    const gsToken = String(spd?.GsIdmsToken || '');
-    if (!adsid || !gsToken) return {attempted: false, status: 0};
-
-    const serviceToken = spd?.t?.['com.apple.gs.appleid.auth']?.token;
-    const heartbeat = spd?.t?.['com.apple.gs.idms.hb']?.token;
-    const pet = spd?.t?.['com.apple.gs.idms.pet']?.token;
-    if (!serviceToken) return {attempted: false, status: 0};
-    const commonHeaders = {
-        ...build2faHeaders(ani, adsid, gsToken),
-        'User-Agent': 'akd/1.0 CFNetwork/3860.700.1 Darwin/25.6.0',
-        'X-Mme-Client-Info': '<Mac16,3> <macOS;26.6.2;25G83> <com.apple.AuthKit/1 (com.apple.akd/1)>',
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        // AuthKit signs GS tokens with the alternate DSID, but the identity-id
-        // header is the numeric Store/DS person id. Supplying the alternate
-        // DSID in both places makes PDP reject an otherwise valid token (401).
-        ...(dsid ? {'X-Apple-I-Identity-Id': dsid, 'X-Apple-DSID': dsid} : {}),
-        'X-Apple-I-Locale': ani['X-Apple-Locale'],
-        ...(heartbeat ? {'X-Apple-HB-Token': encodedAccountToken(adsid, heartbeat)} : {}),
-        ...(pet ? {'X-Apple-PE-Token': encodedAccountToken(adsid, pet)} : {}),
-        // AKGrandSlamRequestProvider adds this whenever the authenticated
-        // account carries a continuation token. Omitting it causes PDP -9001.
-        'X-Apple-I-CK-Presence': Boolean(spd?.c || spd?.ck) ? 'true' : 'false',
-    };
-    // Apple's current PDP edge uses X-Apple-I-GS-Token. The older
-    // X-Apple-GS-Token spelling is still present in local AuthKit binaries but
-    // is treated by the server as if no token was sent (PDP -9001).
-    delete commonHeaders['X-Apple-Identity-Token'];
-    const body = Buffer.from(JSON.stringify({password}), 'utf8');
-    const response = curlRequest('POST', 'https://gsa.apple.com/grandslam/ws/pdp/intermission', {
-        headers: {
-            ...commonHeaders,
-            'X-Apple-I-GS-Token': encodedAccountToken(adsid, serviceToken),
-        },
-        body,
-        timeout: 30,
-        http2: true,
-    });
-    if (process.env.IPA_DEBUG_AUTH === '1') {
-        console.error(`[auth:pdp] status=${response.status} bytes=${response.body.length}`);
-    }
-    return {attempted: true, status: response.status, body: response.body};
-}
-
 function send2faPush(ani, adsid, gsToken) {
     for (let attempt = 0; attempt < 3; attempt++) {
         const {status} = curlRequest('GET', 'https://gsa.apple.com/auth/verify/trusteddevice',
@@ -462,10 +311,6 @@ function validate2fa(ani, adsid, gsToken, code) {
     for (let attempt = 0; attempt < 3; attempt++) {
         const {status, body} = curlRequest('GET', 'https://gsa.apple.com/grandslam/GsService2/validate',
             {headers, timeout: 25});
-        if (process.env.IPA_DEBUG_AUTH === '1') {
-            const firstTag = (body.toString('utf8').match(/<([A-Za-z][A-Za-z0-9:-]*)\b/) || [])[1] || '';
-            console.error(`[auth:2fa] status=${status} bytes=${body.length} firstTag=${firstTag}`);
-        }
         let vr = null; try { vr = plist.parse(body.toString('utf8')); } catch { /* ignore */ }
         const ec = vr?.Status?.ec ?? vr?.ec;
         if (ec === 0) return true;
@@ -483,9 +328,7 @@ function storeAuthenticate(email, pet, ani, adsid, gsToken, guid, jar) {
     const body = plist.build({appleId: email, attempt: '1', createSession: 'true', guid, password: pet, rmp: '0', why: 'signIn'});
     const headers = {
         'User-Agent': STORE_UA,
-        // Match ipatool v2.3.2 exactly. ApplePackage uses x-apple-plist, but
-        // ipatool's verified legacy fallback uses this content type.
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/x-apple-plist',
         'X-Apple-I-MD': ani['X-Apple-I-MD'],
         'X-Apple-I-MD-M': ani['X-Apple-I-MD-M'],
         'X-Apple-I-MD-RINFO': ani['X-Apple-I-MD-RINFO'],
@@ -496,21 +339,9 @@ function storeAuthenticate(email, pet, ani, adsid, gsToken, guid, jar) {
         'X-Apple-Identity-Token': idToken,
     };
     let res = null;
-    for (let pass = 0; pass < 2; pass++) {
-        for (const endpoint of storeAuthCandidates(guid)) {
-            res = postStoreAuth(endpoint, headers, body, jar);
-            if (process.env.IPA_DEBUG_AUTH === '1') {
-                const contentType = headerValue(res?.headers || '', 'content-type');
-                const location = headerValue(res?.headers || '', 'location');
-                const firstTag = (res?.body?.toString('utf8').match(/<([A-Za-z][A-Za-z0-9:-]*)\b/) || [])[1] || '';
-                console.error(`[auth:store] endpoint=${new URL(endpoint).origin}${new URL(endpoint).pathname} status=${res?.status || 0} bytes=${res?.body?.length || 0} contentType=${contentType} firstTag=${firstTag} redirected=${location ? 'yes' : 'no'}`);
-            }
-            if (!shouldFallbackStoreAuth(res)) break;
-        }
-        if (!shouldFallbackStoreAuth(res)) break;
-    }
-    if (shouldFallbackStoreAuth(res)) {
-        throw storeAuthRejected(res);
+    for (let attempt = 1; attempt <= 4; attempt++) {
+        res = curlRequest('POST', STORE_AUTH_URL, {headers, body, follow: true, timeout: 30, jar});
+        if (res.status !== 0) break;
     }
     const parsed = parsePlistLoose(res.body, t('ctx_store_login_resp'));
     if (parsed.customerMessage === 'MZFinance.BadLogin.Configurator_message' && !parsed.passwordToken) {
@@ -527,48 +358,27 @@ function storeAuthenticate(email, pet, ani, adsid, gsToken, guid, jar) {
 // Asspp / ApplePackage 风格的 StoreServices 登录：稳定 guid + 账号密码 + 既有 cookies。
 // 首次登录需要 2FA；之后复用 cookies 轮换 passwordToken，避免重新创建 GSA/anisette 设备。
 function storePasswordAuthenticate(email, password, code, guid, jar) {
+    const body = plist.build({
+        appleId: email,
+        attempt: code ? '2' : '4',
+        guid,
+        password: `${password}${code || ''}`,
+        rmp: '0',
+        why: 'signIn',
+    });
     const headers = {
         'User-Agent': STORE_UA,
         'Content-Type': 'application/x-apple-plist',
     };
 
     let res = null;
-    const endpoints = storeAuthCandidates(guid);
-    // Configurator's `attempt` is a flow selector, not an incrementing retry
-    // counter. Apple currently expects 4 for the password-only challenge and
-    // 2 when the six-digit trusted-device code is appended to the password.
-    // Sending 1 here makes /native/fast/ reject an otherwise valid login with
-    // an empty 403, which was previously misreported as a network problem.
-    const flowAttempt = code ? '2' : '4';
-    for (let networkAttempt = 0; networkAttempt < 2; networkAttempt++) {
-        const body = plist.build({
-            appleId: email,
-            attempt: flowAttempt,
-            guid,
-            password: `${password}${String(code || '').replaceAll(' ', '')}`,
-            rmp: '0',
-            why: 'signIn',
-        });
-        for (const endpoint of endpoints) {
-            res = postStoreAuth(endpoint, headers, body, jar);
-            if (process.env.IPA_DEBUG_AUTH === '1') {
-                const contentType = headerValue(res?.headers || '', 'content-type');
-                const location = headerValue(res?.headers || '', 'location');
-                console.error(`[auth:store-password] flow=${flowAttempt} retry=${networkAttempt + 1} endpoint=${endpoint} status=${res?.status || 0} bytes=${res?.body?.length || 0} contentType=${contentType} location=${location ? 'yes' : 'no'}`);
-            }
-            // ipatool v2.3.2: native auth may return an HTML/non-plist body with
-            // 403, or an empty 204/404/503. Retry the same plist body against the
-            // legacy MZFinance endpoint instead of trying to parse that response.
-            if (!shouldFallbackStoreAuth(res)) break;
-        }
-        if (!shouldFallbackStoreAuth(res)) break;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+        const endpoint = nativeAuthURL(fetchNativeAuthEndpoint(guid), guid);
+        res = curlRequest('POST', endpoint, {headers, body, follow: true, timeout: 30, jar});
+        if (res.status !== 0) break;
     }
 
-    if (!res?.body?.length) {
-        throw storeAuthRejected(res);
-    }
-
-    const parsed = parsePlistLoose(res.body, t('ctx_store_login_resp'));
+    const parsed = parsePlistLoose(res?.body || Buffer.alloc(0), t('ctx_store_login_resp'));
     if (String(parsed.failureType || '') === '' && !code && parsed.customerMessage === 'MZFinance.BadLogin.Configurator_message') {
         throw needs2faError();
     }
@@ -612,56 +422,27 @@ export async function storeLogin(email, password, code, guid, cookieText = '', p
 
 // 主入口：返回与旧 Store.login 兼容的 user 对象。
 // code 为空且账号需要 2FA 时，会先向受信任设备推送验证码，并抛出「需要双重验证码」。
-export async function gsaLogin(email, password, code, guid, codeProvider = null) {
-    const normalizedCode = String(code || '').replaceAll(' ', '').trim();
+export async function gsaLogin(email, password, code, guid) {
     const ani = await fetchAnisette();
+
     let {spd, status} = srpLogin(email, password, ani);
-    const requires2FA = status.au === 'trustedDeviceSecondaryAuth' || status.au === 'secondaryAuth';
 
-    if (!normalizedCode && requires2FA) {
-        const pushed = send2faPush(ani, spd.adsid, spd.GsIdmsToken);
-        if (!pushed) {
-            const error = new Error('无法向受信任 Apple 设备请求双重认证验证码，请检查网络后重试');
-            error.code = 'TWOFA_PUSH_FAILED';
-            throw error;
+    if (status.au === 'trustedDeviceSecondaryAuth' || status.au === 'secondaryAuth') {
+        if (!code) {
+            send2faPush(ani, spd.adsid, spd.GsIdmsToken);
+            throw needs2faError();
         }
-        if (typeof codeProvider !== 'function') throw needs2faError();
-        code = String(await codeProvider()).replaceAll(' ', '').trim();
-        if (!/^\d{6}$/.test(code)) throw new Error(t('wrong_code'));
-    }
-
-    if (requires2FA) {
         const ok = validate2fa(ani, spd.adsid, spd.GsIdmsToken, code);
         if (!ok) throw new Error(t('wrong_code'));
         ({spd, status} = srpLogin(email, password, ani));
         if (status.au) throw new Error(t('twofa_incomplete'));
     }
 
-    debugAuthenticationShape(spd, status);
-
-    // macOS 26.3+ performs this authenticated password intermission before a
-    // commerce login. It upgrades the account's PDP state without persisting
-    // the Apple account in macOS Accounts.
-    const pdpResult = performPDPIntermission(password, ani, spd);
-    if (pdpResult.attempted && pdpResult.status >= 500) {
-        throw new Error(`Apple PDP 服务暂时不可用（HTTP ${pdpResult.status}）`);
-    }
-
     const pet = spd.t?.['com.apple.gs.idms.pet']?.token;
     if (!pet) throw new Error(t('no_pet'));
 
     const jar = path.join(tmpDir(), 'store-cookies.txt');
-    let storeResult;
-    try {
-        storeResult = storeAuthenticate(email, pet, ani, spd.adsid, spd.GsIdmsToken, guid, jar);
-    } catch (error) {
-        // Apple's newer commerce gateway may reject a PET used directly as the
-        // Store password while still accepting the original password bound to
-        // the freshly authenticated GSA/anisette identity.
-        if (error?.code !== 'STORE_HTTP_REJECTED') throw error;
-        storeResult = storeAuthenticate(email, password, ani, spd.adsid, spd.GsIdmsToken, guid, jar);
-    }
-    const {parsed, storeFront, pod} = storeResult;
+    const {parsed, storeFront, pod} = storeAuthenticate(email, pet, ani, spd.adsid, spd.GsIdmsToken, guid, jar);
 
     const user = userFromStoreAuth(email, parsed, storeFront, pod, jar);
     if (!parsed.accountInfo) {

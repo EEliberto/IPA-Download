@@ -11,7 +11,6 @@
 		1A000000000000000000000B /* Assets.car in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000009 /* Assets.car */; };
 		1A0000000000000000000020 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000021 /* Localizable.xcstrings */; };
 		1A0000000000000000000024 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000023 /* Sparkle */; };
-		1A0000000000000000000025 /* ApplePackage in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000027 /* ApplePackage */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,7 +26,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1A0000000000000000000025 /* ApplePackage in Frameworks */,
 				1A0000000000000000000024 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -80,7 +78,6 @@
 			);
 			name = "Pastel";
 			packageProductDependencies = (
-				1A0000000000000000000027 /* ApplePackage */,
 				1A0000000000000000000023 /* Sparkle */,
 			);
 			productName = Pastel;
@@ -117,7 +114,6 @@
 			);
 			mainGroup = 1A0000000000000000000004;
 			packageReferences = (
-				1A0000000000000000000026 /* XCRemoteSwiftPackageReference "ApplePackage" */,
 				1A0000000000000000000022 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			productRefGroup = 1A0000000000000000000005 /* Products */;
@@ -159,7 +155,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nRES=\"${CODESIGNING_FOLDER_PATH}/Contents/Resources\"\nmkdir -p \"${RES}/NodeProject\" \"${RES}/node/bin\"\n/usr/bin/rsync -a --delete --exclude '.DS_Store' \"${SRCROOT}/NodeProject/\" \"${RES}/NodeProject/\"\n/bin/cp -f \"${SRCROOT}/node/bin/node\" \"${RES}/node/bin/node\"\n/bin/chmod 755 \"${RES}/node/bin/node\"\n/usr/bin/codesign --force --sign - \"${RES}/node/bin/node\"\n/bin/sh \"${SRCROOT}/Scripts/PatchSparkleLocalizations.sh\" \"${CODESIGNING_FOLDER_PATH}\"\nSPARKLE_VERSION=\"${CODESIGNING_FOLDER_PATH}/Contents/Frameworks/Sparkle.framework/Versions/B\"\nif [ -d \"${SPARKLE_VERSION}\" ]; then\n  /usr/bin/codesign --force --sign - --preserve-metadata=identifier,entitlements,flags \"${SPARKLE_VERSION}\"\nfi\n/usr/bin/xattr -cr \"${CODESIGNING_FOLDER_PATH}\" || true\n";
+			shellScript = "set -e\nRES=\"${CODESIGNING_FOLDER_PATH}/Contents/Resources\"\nmkdir -p \"${RES}/NodeProject\" \"${RES}/node/bin\"\n/usr/bin/rsync -a --delete --exclude '.DS_Store' \"${SRCROOT}/NodeProject/\" \"${RES}/NodeProject/\"\n/bin/cp -f \"${SRCROOT}/node/bin/node\" \"${RES}/node/bin/node\"\n/bin/chmod 755 \"${RES}/node/bin/node\"\n/usr/bin/codesign --force --sign - \"${RES}/node/bin/node\"\n/bin/sh \"${SRCROOT}/Scripts/PatchSparkleLocalizations.sh\" \"${CODESIGNING_FOLDER_PATH}\"\n/usr/bin/xattr -cr \"${CODESIGNING_FOLDER_PATH}\" || true\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -217,7 +213,7 @@
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 10;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Pastel/Info.plist;
@@ -225,7 +221,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 270822;
+				MARKETING_VERSION = 26.7.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.allenmiao.ipahistorydownload;
 				PRODUCT_NAME = "Pastel";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -240,7 +236,7 @@
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 10;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Pastel/Info.plist;
@@ -248,7 +244,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 270822;
+				MARKETING_VERSION = 26.7.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.allenmiao.ipahistorydownload;
 				PRODUCT_NAME = "Pastel";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -280,14 +276,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		1A0000000000000000000026 /* XCRemoteSwiftPackageReference "ApplePackage" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/Lakr233/ApplePackage";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.2.7;
-			};
-		};
 		1A0000000000000000000022 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
@@ -299,11 +287,6 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		1A0000000000000000000027 /* ApplePackage */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 1A0000000000000000000026 /* XCRemoteSwiftPackageReference "ApplePackage" */;
-			productName = ApplePackage;
-		};
 		1A0000000000000000000023 /* Sparkle */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 1A0000000000000000000022 /* XCRemoteSwiftPackageReference "Sparkle" */;

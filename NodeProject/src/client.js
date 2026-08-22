@@ -1,5 +1,5 @@
 import plist from 'plist';
-import {gsaLogin, storeLogin, curlRequest, parsePlistLoose, STORE_USER_AGENT, cleanup} from './gsa.js';
+import {storeLogin, curlRequest, parsePlistLoose, STORE_USER_AGENT, cleanup} from './gsa.js';
 import {getDeviceGuid} from './device.js';
 import {t} from './i18n.js';
 
@@ -25,6 +25,18 @@ function tokenExpiredError() {
 
 function isPasswordTokenExpiredMessage(message) {
     return /Your password has changed\.?|password token is expired/i.test(String(message || ''));
+}
+
+// ipaverse treats these StoreServices failures as authentication/session
+// failures. Apple does not consistently include an English error message, so
+// relying on customerMessage alone leaves some expired sessions undetected.
+const AUTH_FAILURE_TYPES = new Set(['-5000', '1008', '2002', '2034', '2042']);
+
+export function isAuthFailureResponse(failureType, customerMessage, statusCode = 200) {
+    return statusCode === 401
+        || statusCode === 403
+        || AUTH_FAILURE_TYPES.has(String(failureType || ''))
+        || isPasswordTokenExpiredMessage(customerMessage);
 }
 
 const _endpoints = {
@@ -65,16 +77,10 @@ class Store {
         cleanup();
     }
 
-    // 经 GSA / SRP / 2FA / PET 换取 StoreServices 令牌。
-    // 未提供验证码且账号需要 2FA 时，会向受信任设备推送验证码并抛出「需要双重验证码」。
-    static async login(email, password, mfa, previousSession = null, fresh = false, codeProvider = null) {
+    // 与 Asspp 一样直接使用 StoreServices 登录；此活动路径不调用
+    // GSA/Anisette，因此不会创建模拟 Mac 设备记录。
+    static async login(email, password, mfa, previousSession = null) {
         try {
-            // Fresh authentication uses our GSA/SRP/PDP flow. Apple retired
-            // the legacy password-only Store endpoint; PDP now requires the
-            // X-Apple-I-GS-Token header before it will issue a commerce token.
-            if (fresh) {
-                return await gsaLogin(email, password, mfa, this.guid, codeProvider);
-            }
             return await storeLogin(email, password, mfa, this.guid, previousSession?.cookieText || '', previousSession?.pod || '');
         } catch (error) {
             const msg = error.message || String(error);
@@ -102,6 +108,7 @@ class Store {
             e.code = 'STORE_FAIL';
             throw e;
         }
+        if (isAuthFailureResponse('', '', res.status)) throw tokenExpiredError();
         try {
             return parsePlistLoose(res.body, t('ctx_resp'));
         } catch (error) {
@@ -128,8 +135,10 @@ class Store {
             e.code = 'APPINFO_FAIL';
             throw e;
         }
+        if (isAuthFailureResponse(parsedResp.failureType, parsedResp.customerMessage)) {
+            throw tokenExpiredError();
+        }
         if (parsedResp.customerMessage) {
-            if (isPasswordTokenExpiredMessage(parsedResp.customerMessage)) throw tokenExpiredError();
             const e = new Error(t('appinfo_custom', {msg: parsedResp.customerMessage}));
             e.code = 'APPINFO_FAIL';
             throw e;
@@ -160,7 +169,9 @@ class Store {
                 else if (parsedResp.status === 0) message = t('lic_new');
                 return {...parsedResp, _state: 'success', customerMessage: message};
             }
-            if (isPasswordTokenExpiredMessage(parsedResp.customerMessage)) throw tokenExpiredError();
+            if (isAuthFailureResponse(parsedResp.failureType, parsedResp.customerMessage)) {
+                throw tokenExpiredError();
+            }
             lastMsg = parsedResp.customerMessage || t('lic_fail_msg');
         }
         const e = new Error(t('license_failed', {msg: lastMsg}));

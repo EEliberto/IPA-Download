@@ -3,31 +3,6 @@
     <channel>
         <title>Pastel</title>
         <item>
-            <title>270822</title>
-            <pubDate>Sat, 22 Aug 2026 13:00:43 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel11</link>
-            <sparkle:version>11</sparkle:version>
-            <sparkle:shortVersionString>270822</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[## 更新日志
-
-### Apple 账户登录修复
-
-- 重构 Apple 账户登录流程，登录主流程不再依赖 ApplePackage 完成认证。
-- 适配 Apple 最新 GrandSlam/PDP 验证协议，修复登录时出现 HTTP 403、空响应及网络错误的问题。
-- 修复双重认证验证码不触发、提交后失效的问题。
-- 登录与验证码验证现在保持在同一认证会话中，避免 Anisette 设备身份变化。
-- 修复本机代理残留导致 Apple StoreServices 请求被拒绝的问题。
-- 增强 Apple 边缘节点异常响应的重试机制。
-- 修复长期未登录后会话失效却没有重新登录入口的问题。
-- 下载凭据过期时将引导用户重新登录。
-- 优化错误提示及重试操作，避免错误气泡拦截按钮点击。
-- 登录密码继续由 macOS Keychain 安全保存。
-]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel11/Pastel-270822-build-11.dmg" length="47639730" type="application/octet-stream" sparkle:edSignature="7lNY/lDBYBldQkCAiRXWA6K7pH9SU5tXuKmMyNbHCO7OBIwPdGllQ91cdpuF0gcRm2SCyVe7l8nyrbUsKWHsDg=="/>
-        </item>
-        <item>
             <title>26.7.1</title>
             <pubDate>Mon, 27 Jul 2026 16:12:00 +0800</pubDate>
             <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel10</link>

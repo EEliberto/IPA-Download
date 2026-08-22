@@ -2,7 +2,6 @@ import 'dotenv/config';
 import {Ipa} from './src/ipa.js';
 import {featuredApps, fetchVersions, lookupApp, searchApps} from './src/catalog.js';
 import {t} from './src/i18n.js';
-import readline from 'readline';
 
 function requiredEnv(name) {
     const value = process.env[name];
@@ -96,23 +95,9 @@ async function runCommand(command, args) {
             CODE: process.env.APPLE_CODE || '',
         });
 
-        // 设置页明确要求“登录/重新登录”时，不复用旧 cookie，确保完整执行认证并在需要时触发 2FA。
+        // 校验账户模式：优先复用本地会话；没有会话时才登录，避免每次编辑/验证账号都触发新设备登录。
         if (process.env.IPA_VALIDATE_LOGIN) {
-            const interactive = process.env.IPA_INTERACTIVE_LOGIN === '1';
-            const codeProvider = interactive ? async () => {
-                printJSON({needsCode: true});
-                const reader = readline.createInterface({input: process.stdin, terminal: false});
-                try {
-                    return await new Promise(resolve => reader.once('line', resolve));
-                } finally {
-                    reader.close();
-                }
-            } : null;
-            await app.login({
-                force: process.env.IPA_FORCE_LOGIN === '1',
-                fresh: process.env.IPA_FORCE_LOGIN === '1',
-                codeProvider,
-            });
+            await app.login({force: process.env.IPA_FORCE_LOGIN === '1'});
             const storefront = String(app.user?.authHeaders?.['X-Apple-Store-Front'] || '').split('-')[0];
             const addr = app.user?.accountInfo?.address || {};
             printJSON({ok: true, storefront, firstName: addr.firstName || '', lastName: addr.lastName || ''});
