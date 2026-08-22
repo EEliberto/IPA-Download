@@ -56,6 +56,7 @@ const MESSAGES = {
         gsa_m2_mismatch: 'GSA 服务器校验失败（M2 不匹配）',
         needs_2fa: '需要双重验证码',
         store_token_failed: '商店令牌换取失败',
+        store_http_rejected: 'Apple StoreServices 拒绝签发登录会话（HTTP {status}）。请求已尝试 Apple 当前入口及旧版兼容入口；这不表示密码或验证码错误',
         wrong_code: '验证码不正确或已过期，请重新获取后再试',
         twofa_incomplete: '双重验证未完成，请重试',
         no_pet: '未能取得 PET 令牌',

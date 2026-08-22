@@ -1,5 +1,5 @@
 import plist from 'plist';
-import {storeLogin, curlRequest, parsePlistLoose, STORE_USER_AGENT, cleanup} from './gsa.js';
+import {gsaLogin, storeLogin, curlRequest, parsePlistLoose, STORE_USER_AGENT, cleanup} from './gsa.js';
 import {getDeviceGuid} from './device.js';
 import {t} from './i18n.js';
 
@@ -67,8 +67,14 @@ class Store {
 
     // 经 GSA / SRP / 2FA / PET 换取 StoreServices 令牌。
     // 未提供验证码且账号需要 2FA 时，会向受信任设备推送验证码并抛出「需要双重验证码」。
-    static async login(email, password, mfa, previousSession = null) {
+    static async login(email, password, mfa, previousSession = null, fresh = false, codeProvider = null) {
         try {
+            // Fresh authentication uses our GSA/SRP/PDP flow. Apple retired
+            // the legacy password-only Store endpoint; PDP now requires the
+            // X-Apple-I-GS-Token header before it will issue a commerce token.
+            if (fresh) {
+                return await gsaLogin(email, password, mfa, this.guid, codeProvider);
+            }
             return await storeLogin(email, password, mfa, this.guid, previousSession?.cookieText || '', previousSession?.pod || '');
         } catch (error) {
             const msg = error.message || String(error);

@@ -10,8 +10,8 @@ import {download} from './downloader.js';
 import {t} from './i18n.js';
 
 const SESSION_TTL_MS = Number(process.env.IPA_SESSION_TTL_MS || 365 * 24 * 60 * 60 * 1000);
-const SESSION_FLOW_VERSION = 'appstore-direct-v1';
-const ACCEPTED_SESSION_FLOW_VERSIONS = new Set([SESSION_FLOW_VERSION, 'gsa-srp-v10']);
+const SESSION_FLOW_VERSION = 'gsa-srp-v11';
+const ACCEPTED_SESSION_FLOW_VERSIONS = new Set([SESSION_FLOW_VERSION, 'gsa-srp-v10', 'appstore-direct-v1']);
 
 function appSupportDir() {
     if (process.env.IPA_SESSION_DIR) return process.env.IPA_SESSION_DIR;
@@ -98,9 +98,11 @@ export class Ipa {
         this.usedCachedSession = usedCachedSession;
     }
 
-    async login({force = false} = {}) {
+    async login({force = false, fresh = false, codeProvider = null} = {}) {
         const previousSessionEntry = await this.loadSessionEntry();
-        const previousSession = previousSessionEntry?.user || null;
+        // “重新登录”必须从账号密码开始新的认证流程，不能把旧 cookie
+        // 带回 Apple；否则设置页看似重新登录，实际仍可能静默续用旧会话。
+        const previousSession = fresh ? null : (previousSessionEntry?.user || null);
         if (!force) {
             const cachedUser = validSessionFor(this.creds.APPLE_ID, previousSessionEntry) ? previousSession : null;
             if (cachedUser) {
@@ -108,9 +110,16 @@ export class Ipa {
                 this.applyUser(cachedUser, true);
                 return;
             }
+            // 没有可复用会话时回到登录界面；设置页验证会执行完整的
+            // GSA/SRP/PDP 流程并写入新会话。
+            if (process.env.IPA_VALIDATE_LOGIN !== '1') {
+                const expired = new Error('password token is expired');
+                expired.code = 'TOKEN_EXPIRED';
+                throw expired;
+            }
         }
 
-        const user = await Store.login(this.creds.APPLE_ID, this.creds.PASSWORD, this.creds.CODE, previousSession);
+        const user = await Store.login(this.creds.APPLE_ID, this.creds.PASSWORD, this.creds.CODE, previousSession, fresh, codeProvider);
         console.log(t('login_success', {name: `${user.accountInfo.address.firstName} ${user.accountInfo.address.lastName}`}));
         this.applyUser(user, false);
         await this.saveSession(user).catch(error => {
@@ -220,7 +229,8 @@ export class Ipa {
         return await this._withReauth(() => this.runDownload(options));
     }
 
-    // 执行 fn；若失败且疑似本地缓存会话过期，则清会话、强制重新登录（可能触发 2FA）后重试一次。
+    // 登录现由 macOS 端的 ApplePackage 完成。缓存令牌失效时不要再从 Node/curl
+    // 走旧认证链路；清掉失效会话并让界面提供“重新登录”入口。
     async _withReauth(fn) {
         try {
             const result = await fn();
@@ -236,11 +246,10 @@ export class Ipa {
                 && !/License not found|已拥有|already|not found/i.test(message);
             if (!sessionMayBeExpired) throw error;
 
-            console.log(t('relogin'));
-            await this.login({force: true});
-            const result = await fn();
-            await this.persistCurrentSession().catch(() => {});
-            return result;
+            await this.clearSession();
+            const expired = new Error('password token is expired');
+            expired.code = 'TOKEN_EXPIRED';
+            throw expired;
         }
     }
 }

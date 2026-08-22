@@ -1,4 +1,5 @@
 import AppKit
+import ApplePackage
 import Combine
 import CryptoKit
 import Darwin
@@ -586,6 +587,13 @@ enum NodeRuntimeError: LocalizedError {
 }
 
 struct NodeRuntime {
+    struct LoginValidationResult: Decodable {
+        let ok: Bool
+        let storefront: String
+        let firstName: String
+        let lastName: String
+    }
+
     static func locate() throws -> (projectURL: URL, mainURL: URL, nodeURL: URL) {
         guard let resourceURL = Bundle.main.resourceURL else {
             throw NodeRuntimeError.missingResourceDirectory
@@ -671,6 +679,175 @@ struct NodeRuntime {
 
             return outputData
         }.value
+    }
+
+    static func validateLogin(email: String, password: String, code: String,
+                              sessionDirectory: URL, timeout: TimeInterval = 120) async throws -> LoginValidationResult {
+        try await Task.detached(priority: .userInitiated) {
+            let key = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+            if !code.isEmpty {
+                pendingLoginLock.lock()
+                let pending = pendingLogins.removeValue(forKey: key)
+                pendingLoginLock.unlock()
+                guard let pending else {
+                    throw NodeRuntimeError.processFailed(String(localized: "验证码会话已失效，请重新登录以获取新验证码。"))
+                }
+                do {
+                    try pending.input.fileHandleForWriting.write(contentsOf: Data("\(code)\n".utf8))
+                    try? pending.input.fileHandleForWriting.close()
+                    return try await finishPendingLogin(pending, timeout: timeout)
+                } catch {
+                    pending.task.terminate()
+                    pending.cleanup()
+                    throw error
+                }
+            }
+
+            let runtime = try locate()
+            let fileManager = FileManager.default
+            let tempURL = fileManager.temporaryDirectory
+                .appendingPathComponent("Pastel-Login-\(UUID().uuidString)", isDirectory: true)
+            try fileManager.createDirectory(at: tempURL, withIntermediateDirectories: true)
+
+            let outputURL = tempURL.appendingPathComponent("stdout.txt")
+            let errorURL = tempURL.appendingPathComponent("stderr.txt")
+            fileManager.createFile(atPath: outputURL.path, contents: nil)
+            fileManager.createFile(atPath: errorURL.path, contents: nil)
+            let outputHandle = try FileHandle(forWritingTo: outputURL)
+            let errorHandle = try FileHandle(forWritingTo: errorURL)
+            let input = Pipe()
+
+            let task = Process()
+            task.executableURL = runtime.nodeURL
+            task.arguments = ["main.js"]
+            task.currentDirectoryURL = runtime.projectURL
+            var environment = baseEnvironment()
+            environment["APPLE_ID"] = email
+            environment["APPLE_PWD"] = password
+            environment["APPLE_CODE"] = code
+            environment["IPA_VALIDATE_LOGIN"] = "1"
+            environment["IPA_FORCE_LOGIN"] = "1"
+            environment["IPA_INTERACTIVE_LOGIN"] = "1"
+            environment["IPA_DEVICE_GUID"] = DeviceGUIDStore.current()
+            environment["IPA_SESSION_DIR"] = sessionDirectory.path
+            task.environment = environment
+            task.standardOutput = outputHandle
+            task.standardError = errorHandle
+            task.standardInput = input
+
+            let pending = PendingNodeLogin(task: task, input: input, outputHandle: outputHandle,
+                                           errorHandle: errorHandle, outputURL: outputURL,
+                                           errorURL: errorURL, tempURL: tempURL)
+            do {
+                try task.run()
+            } catch {
+                pending.cleanup()
+                throw error
+            }
+            let deadline = Date().addingTimeInterval(timeout)
+            while task.isRunning {
+                let output = (try? String(contentsOf: outputURL, encoding: .utf8)) ?? ""
+                if output.split(whereSeparator: \Character.isNewline).contains(where: { line in
+                    guard let data = String(line).data(using: .utf8),
+                          let progress = try? JSONDecoder().decode(LoginProgress.self, from: data)
+                    else { return false }
+                    return progress.needsCode
+                }) {
+                    pendingLoginLock.lock()
+                    if let previous = pendingLogins.updateValue(pending, forKey: key) {
+                        previous.task.terminate()
+                        previous.cleanup()
+                    }
+                    pendingLoginLock.unlock()
+                    throw NodeRuntimeError.processFailed("NEEDS_2FA")
+                }
+                if Date() >= deadline {
+                    task.terminate()
+                    pending.cleanup()
+                    throw NodeRuntimeError.processFailed(String(localized: "Apple 登录请求超时，请重试。"))
+                }
+                do {
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                } catch {
+                    task.terminate()
+                    pending.cleanup()
+                    throw error
+                }
+            }
+            return try parseCompletedLogin(pending)
+        }.value
+    }
+
+    private struct LoginProgress: Decodable {
+        let needsCode: Bool
+    }
+
+    private final class PendingNodeLogin {
+        let task: Process
+        let input: Pipe
+        let outputHandle: FileHandle
+        let errorHandle: FileHandle
+        let outputURL: URL
+        let errorURL: URL
+        let tempURL: URL
+
+        init(task: Process, input: Pipe, outputHandle: FileHandle, errorHandle: FileHandle,
+             outputURL: URL, errorURL: URL, tempURL: URL) {
+            self.task = task
+            self.input = input
+            self.outputHandle = outputHandle
+            self.errorHandle = errorHandle
+            self.outputURL = outputURL
+            self.errorURL = errorURL
+            self.tempURL = tempURL
+        }
+
+        func cleanup() {
+            try? input.fileHandleForWriting.close()
+            try? outputHandle.close()
+            try? errorHandle.close()
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+    }
+
+    private static let pendingLoginLock = NSLock()
+    private static var pendingLogins: [String: PendingNodeLogin] = [:]
+
+    private static func finishPendingLogin(_ pending: PendingNodeLogin,
+                                           timeout: TimeInterval) async throws -> LoginValidationResult {
+        let deadline = Date().addingTimeInterval(timeout)
+        while pending.task.isRunning {
+            if Date() >= deadline {
+                pending.task.terminate()
+                pending.cleanup()
+                throw NodeRuntimeError.processFailed(String(localized: "Apple 登录请求超时，请重试。"))
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return try parseCompletedLogin(pending)
+    }
+
+    private static func parseCompletedLogin(_ pending: PendingNodeLogin) throws -> LoginValidationResult {
+        try? pending.outputHandle.close()
+        try? pending.errorHandle.close()
+        defer { pending.cleanup() }
+        let output = (try? String(contentsOf: pending.outputURL, encoding: .utf8)) ?? ""
+        let errorOutput = (try? String(contentsOf: pending.errorURL, encoding: .utf8)) ?? ""
+        if pending.task.terminationStatus != 0 {
+            let message = [errorOutput, output]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n")
+            throw NodeRuntimeError.processFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        for line in output.split(whereSeparator: \Character.isNewline).reversed() {
+            guard let data = String(line).data(using: .utf8),
+                  let result = try? JSONDecoder().decode(LoginValidationResult.self, from: data),
+                  result.ok
+            else { continue }
+            return result
+        }
+        throw NodeRuntimeError.processFailed(String(localized: "Apple 登录成功但未返回账户信息。"))
     }
 }
 
@@ -908,6 +1085,7 @@ func downloadErrorMessage(from log: String) -> String {
         return String(localized: "验证码不正确或已过期。请重新获取后再试。")
     }
     if text.contains("网络请求失败")
+        || text.contains("Apple 商店拒绝了当前网络")
         || text.localizedCaseInsensitiveContains("network")
         || text.localizedCaseInsensitiveContains("timed out")
         || text.localizedCaseInsensitiveContains("unable to connect") {
@@ -931,6 +1109,12 @@ func downloadErrorMessage(from log: String) -> String {
         return String(localized: "下载未能完成。") + "\n" + detail
     }
     return String(localized: "下载未能完成。请稍后再试。")
+}
+
+func downloadRequiresRelogin(from log: String) -> Bool {
+    log.localizedCaseInsensitiveContains("Your password has changed")
+        || log.localizedCaseInsensitiveContains("password token is expired")
+        || log.contains("本地会话可能已失效")
 }
 
 private func cleanDownloadErrorDetail(_ line: String) -> String? {
@@ -1048,11 +1232,10 @@ final class AccountStore: ObservableObject {
     @Published var validationMessage = ""
     @Published var needsCode = false
     @Published var saveTick = 0
+    @Published var reloginRequestID: UUID?
 
-    private var process: Process?
-    private var pipes: (Pipe, Pipe)?
-    private var validationLog = ""
-    private var pending: (email: String, password: String, editingID: UUID?, country: String)?
+    private var validationTask: Task<Void, Never>?
+    private var pending: (email: String, password: String, editingID: UUID?, country: String, forceFreshLogin: Bool)?
 
     var selectedAccount: StoredAccount? { accounts.first { $0.id == selectedAccountID } }
     var hasSelectedLogin: Bool {
@@ -1091,6 +1274,11 @@ final class AccountStore: ObservableObject {
         guard selectedAccountID != account.id else { return }
         selectedAccountID = account.id
         persist(String(localized: "已切换到 \(account.displayLabel)"))
+    }
+
+    func requestRelogin(for account: StoredAccount? = nil) {
+        if let account { select(account) }
+        reloginRequestID = account?.id ?? selectedAccountID
     }
 
     func delete(_ account: StoredAccount) {
@@ -1137,7 +1325,8 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    func validate(email: String, password: String, editingID: UUID?, fallbackCountry: String) {
+    func validate(email: String, password: String, editingID: UUID?, fallbackCountry: String,
+                  forceFreshLogin: Bool = false) {
         let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanEmail.isEmpty else { validationMessage = String(localized: "请输入 Apple 账户。"); return }
         guard !password.isEmpty else { validationMessage = String(localized: "请输入密码。"); return }
@@ -1146,7 +1335,7 @@ final class AccountStore: ObservableObject {
             validationMessage = String(localized: "此 Apple 账户已经存在。")
             return
         }
-        pending = (cleanEmail, password, editingID, fallbackCountry)
+        pending = (cleanEmail, password, editingID, fallbackCountry, forceFreshLogin)
         validationMessage = String(localized: "正在登录并验证 Apple 账户…")
         runValidation(code: "")
     }
@@ -1160,8 +1349,8 @@ final class AccountStore: ObservableObject {
     }
 
     func cancelValidation() {
-        process?.terminate()
-        cleanup()
+        validationTask?.cancel()
+        validationTask = nil
         isValidating = false
         needsCode = false
         validationMessage = ""
@@ -1170,71 +1359,56 @@ final class AccountStore: ObservableObject {
 
     private func runValidation(code: String) {
         guard let pending else { return }
-        let runtime: (projectURL: URL, mainURL: URL, nodeURL: URL)
-        do { runtime = try NodeRuntime.locate() }
-        catch { isValidating = false; validationMessage = error.localizedDescription; return }
-
+        validationTask?.cancel()
         isValidating = true
         needsCode = false
-        validationLog = ""
-
-        let task = Process()
-        task.executableURL = runtime.nodeURL
-        task.arguments = ["main.js"]
-        task.currentDirectoryURL = runtime.projectURL
-        var env = NodeRuntime.baseEnvironment()
-        env["APPLE_ID"] = pending.email
-        env["APPLE_PWD"] = pending.password
-        env["APPLE_CODE"] = code
-        env["IPA_VALIDATE_LOGIN"] = "1"
-        env["IPA_DEVICE_GUID"] = DeviceGUIDStore.current()
-        if let sessionURL = Self.sessionDirectoryURL() { env["IPA_SESSION_DIR"] = sessionURL.path }
-        task.environment = env
-
-        let out = Pipe(); let err = Pipe()
-        task.standardOutput = out; task.standardError = err
-        pipes = (out, err)
-        let handler: @Sendable (FileHandle) -> Void = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty else { return }
-            let t = String(data: d, encoding: .utf8) ?? String(decoding: d, as: UTF8.self)
-            Task { @MainActor in self?.validationLog += t.replacingOccurrences(of: "\r", with: "\n") }
-        }
-        out.fileHandleForReading.readabilityHandler = handler
-        err.fileHandleForReading.readabilityHandler = handler
-        task.terminationHandler = { [weak self] finished in
-            let exit = finished.terminationStatus
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                self?.finishValidation(exitCode: exit)
+        validationTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                // Use the in-app GSA/SRP/PDP implementation directly. The first
+                // invocation securely caches only the short-lived Anisette
+                // challenge; the verification-code invocation reuses that exact
+                // device identity and deletes it after successful 2FA.
+                guard let sessionDirectory = Self.sessionDirectoryURL() else {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                let loginResult = try await NodeRuntime.validateLogin(
+                    email: pending.email,
+                    password: pending.password,
+                    code: code,
+                    sessionDirectory: sessionDirectory
+                )
+                let storefront = loginResult.storefront
+                guard !Task.isCancelled else { return }
+                self.validationTask = nil
+                self.isValidating = false
+                self.needsCode = false
+                if self.saveValidated(storefront: storefront) {
+                    self.validationMessage = ""
+                    self.saveTick += 1
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.validationTask = nil
+                self.isValidating = false
+                let message = error.localizedDescription
+                let lower = message.lowercased()
+                if code.isEmpty && (lower.contains("requires verification code")
+                    || lower.contains("verification code")
+                    || lower.contains("2fa")
+                    || lower.contains("needs_2fa")
+                    || lower.contains("需要双重验证码")) {
+                    self.needsCode = true
+                    self.validationMessage = String(localized: "Apple 需要双重认证，请输入受信任设备上显示的 6 位验证码后继续。")
+                } else {
+                    self.needsCode = false
+                    self.validationMessage = Self.nativeAuthenticationMessage(error)
+                }
             }
-        }
-        do { try task.run(); process = task }
-        catch { cleanup(); isValidating = false; validationMessage = error.localizedDescription }
-    }
-
-    private func finishValidation(exitCode: Int32) {
-        cleanup()
-        let log = validationLog
-        if exitCode == 0 {
-            isValidating = false
-            needsCode = false
-            if saveValidated(from: log) {
-                validationMessage = ""
-                saveTick += 1
-            }
-        } else if ipaIsVerificationChallenge(log) {
-            isValidating = false
-            needsCode = true
-            validationMessage = String(localized: "验证码已发送至你的受信任 Apple 设备，请输入双重认证验证码。")
-        } else {
-            isValidating = false
-            needsCode = false
-            validationMessage = validationError(from: log)
         }
     }
 
-    private func saveValidated(from log: String) -> Bool {
+    private func saveValidated(storefront: String) -> Bool {
         guard let pending else { return false }
         guard !containsAccount(pending.email, excluding: pending.editingID) else {
             validationMessage = String(localized: "此 Apple 账户已经存在。")
@@ -1242,11 +1416,7 @@ final class AccountStore: ObservableObject {
             return false
         }
         var countryCode = pending.country
-        if let line = log.split(separator: "\n").map(String.init).first(where: { $0.contains("\"storefront\"") }),
-           let data = line.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let storefront = obj["storefront"] as? String,
-           let mapped = storefrontCountryCode(storefront) {
+        if let mapped = storefrontCountryCode(storefront) {
             countryCode = mapped
         }
         let id = pending.editingID ?? UUID()
@@ -1263,20 +1433,90 @@ final class AccountStore: ObservableObject {
         return true
     }
 
-    private func validationError(from log: String) -> String {
-        let lines = log.split(separator: "\n").map(String.init)
-        if let x = lines.last(where: { $0.contains("[X]") }),
-           let cleaned = cleanDownloadErrorDetail(x) {
-            return cleaned
+    private static func nativeAuthenticationMessage(_ error: Error) -> String {
+        let message = error.localizedDescription
+        let lower = message.lowercased()
+        if lower.contains("5005") {
+            return String(localized: "验证码不正确或已过期，请重新获取后再试。")
         }
-        return String(localized: "无法登录，请确认你的 Apple 账户和密码是否正确。")
+        if lower.contains("timed out") || lower.contains("connect") || lower.contains("network") {
+            return String(localized: "无法连接 Apple 服务器。请检查网络连接后再试。")
+        }
+        if lower.contains("response body is empty") {
+            return String(localized: "Apple 登录服务返回了空响应，请稍后重试。")
+        }
+        return message.isEmpty ? String(localized: "无法登录 Apple 账户。") : message
     }
 
-    private func cleanup() {
-        pipes?.0.fileHandleForReading.readabilityHandler = nil
-        pipes?.1.fileHandleForReading.readabilityHandler = nil
-        pipes = nil
-        process = nil
+    private static func shouldRetryLoginWithLegacyStore(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        // Keep the normal ApplePackage 2FA hand-off intact. Fall back only for
+        // the unexpected native-endpoint responses covered by ipatool #514.
+        if message.contains("verification code") || message.contains("2fa") || message.contains("验证码") {
+            return false
+        }
+        return message.contains("response body is empty")
+            || message.contains("http 204")
+            || message.contains("http 403")
+            || message.contains("http 404")
+            || message.contains("http 503")
+            || message.contains("property list")
+            || message.contains("plist")
+            || message.contains("unknown tag")
+            || message.contains("malformed data")
+    }
+
+    private static func saveNodeSession(_ account: ApplePackage.Account) throws {
+        guard let directory = sessionDirectoryURL() else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        let normalizedEmail = account.email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let digest = SHA256.hash(data: Data(normalizedEmail.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let sessionURL = directory.appendingPathComponent("\(digest).json")
+        let authHeaders: [String: String] = [
+            "X-Dsid": account.directoryServicesIdentifier,
+            "iCloud-DSID": account.directoryServicesIdentifier,
+            "X-Token": account.passwordToken,
+            "X-Apple-Store-Front": account.store,
+        ]
+        let object: [String: Any] = [
+            "appleAccount": normalizedEmail,
+            "flowVersion": "appstore-direct-v1",
+            "savedAt": Date().timeIntervalSince1970 * 1000,
+            "user": [
+                "accountInfo": [
+                    "appleId": account.appleId,
+                    "address": ["firstName": account.firstName, "lastName": account.lastName],
+                ],
+                "dsPersonId": account.directoryServicesIdentifier,
+                "pod": account.pod ?? "",
+                "authHeaders": authHeaders,
+                "cookieText": netscapeCookieFile(account.cookie),
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try data.write(to: sessionURL, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sessionURL.path)
+    }
+
+    private static func netscapeCookieFile(_ cookies: [ApplePackage.Cookie]) -> String {
+        var lines = ["# Netscape HTTP Cookie File", "# Generated by Pastel via ApplePackage"]
+        for cookie in cookies where !cookie.name.isEmpty && !cookie.value.isEmpty {
+            let rawDomain = (cookie.domain?.isEmpty == false ? cookie.domain! : ".apple.com")
+                .replacingOccurrences(of: "\t", with: "")
+                .replacingOccurrences(of: "\n", with: "")
+            let domain = cookie.httpOnly ? "#HttpOnly_\(rawDomain)" : rawDomain
+            let includeSubdomains = rawDomain.hasPrefix(".") ? "TRUE" : "FALSE"
+            let path = cookie.path.isEmpty ? "/" : cookie.path
+            let secure = cookie.secure ? "TRUE" : "FALSE"
+            let expires = Int64(cookie.expiresAt ?? 0)
+            let name = cookie.name.replacingOccurrences(of: "\t", with: "")
+            let value = cookie.value.replacingOccurrences(of: "\t", with: "")
+            lines.append([domain, includeSubdomains, path, secure, "\(expires)", name, value].joined(separator: "\t"))
+        }
+        return lines.joined(separator: "\n") + "\n"
     }
 
     private static func sessionDirectoryURL() -> URL? {
@@ -2214,6 +2454,11 @@ struct ContentView: View {
         openWindow(id: "settings")
     }
 
+    private func showRelogin() {
+        accountStore.requestRelogin()
+        showSettings()
+    }
+
     private func openAuthorGitHub() {
         if let url = URL(string: "https://github.com/EEliberto/IPA-Download") {
             NSWorkspace.shared.open(url)
@@ -2880,6 +3125,7 @@ struct ContentView: View {
                                             onDownload: {
                                                 downloadVersion(record)
                                             },
+                                            onSignIn: showRelogin,
                                             onReveal: {
                                                 if let url = downloadedFileFor(record, removesAppStoreUpdates: noUpdateEnabled(for: record)) { revealInFinder(url) }
                                             },
@@ -3044,7 +3290,12 @@ struct ContentView: View {
     private var manualActionContent: some View {
         switch manualActionState {
         case .error:
-            DownloadErrorIndicator(message: manualErrorMessage, retry: downloadManualVersionID)
+            DownloadErrorIndicator(
+                message: manualErrorMessage,
+                requiresSignIn: downloadRequiresRelogin(from: manualDownloadJob?.log ?? ""),
+                retry: downloadManualVersionID,
+                signIn: showRelogin
+            )
         case .running:
             DownloadProgressPill(progress: manualDownloadJob?.progress, isPackaging: manualDownloadJob?.isPackaging ?? false)
                 .glassEffectID("manual-download-action", in: manualActionGlassNamespace)
@@ -3437,6 +3688,7 @@ struct ContentView: View {
                                     onDownload: {
                                         downloadVersion(record)
                                     },
+                                    onSignIn: showRelogin,
                                     onReveal: {
                                         if let url = downloadedFileFor(record, removesAppStoreUpdates: noUpdateEnabled(for: record)) { revealInFinder(url) }
                                     },
@@ -5141,7 +5393,7 @@ struct ContentView: View {
             guard !Task.isCancelled else { return }
 
             let worker = Task.detached(priority: .utility) {
-                Self.scanDownloadLibrary(at: dirURL)
+                await Self.scanDownloadLibrary(at: dirURL)
             }
             let snapshot = await withTaskCancellationHandler {
                 await worker.value
@@ -6572,6 +6824,7 @@ struct VersionSelectionRow: View {
     let onSelect: () -> Void
     let onToggleNoUpdate: (Bool) -> Void
     let onDownload: () -> Void
+    let onSignIn: () -> Void
     let onReveal: () -> Void
     let onAirDrop: () -> Void
     let onDelete: () -> Void
@@ -6670,7 +6923,12 @@ struct VersionSelectionRow: View {
     private var actionContent: some View {
         switch actionState {
         case .error:
-            DownloadErrorIndicator(message: errorMessage, retry: onDownload)
+            DownloadErrorIndicator(
+                message: errorMessage,
+                requiresSignIn: downloadRequiresRelogin(from: errorLog),
+                retry: onDownload,
+                signIn: onSignIn
+            )
         case .running:
             DownloadProgressPill(progress: downloadProgress, isPackaging: isPackaging)
                 .glassEffectID("version-row-action", in: actionGlassNamespace)
@@ -6749,39 +7007,123 @@ struct VersionSelectionRow: View {
 
 private struct DownloadErrorIndicator: View {
     let message: String
+    let requiresSignIn: Bool
     let retry: () -> Void
+    let signIn: () -> Void
     @State private var showingDetails = false
 
     var body: some View {
-        Button(action: retry) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.yellow)
-                .frame(width: 58, height: 26)
-                .contentShape(Capsule())
-        }
-        .buttonStyle(StablePressButtonStyle())
-        .glassEffect(.regular.tint(Color.yellow.opacity(0.18)).interactive(), in: Capsule())
-        .onHover { showingDetails = $0 }
-        .popover(isPresented: $showingDetails, arrowEdge: .top) {
-            VStack(alignment: .leading, spacing: 10) {
-                Label(String(localized: "下载失败"), systemImage: "exclamationmark.triangle.fill")
-                    .font(.headline)
+        HStack(spacing: 4) {
+            Button(action: retry) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.yellow)
+                    .frame(width: requiresSignIn ? 30 : 58, height: 26)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(StablePressButtonStyle())
+            .glassEffect(.regular.tint(Color.yellow.opacity(0.18)).interactive(), in: Capsule())
+            .onHover { showingDetails = $0 }
+            .background {
+                SystemDownloadErrorPopoverAnchor(message: message, isPresented: $showingDetails)
+            }
 
-                ScrollView {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.primary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                .frame(width: 360)
-                .frame(maxHeight: 220)
+            if requiresSignIn {
+                Button(action: signIn) {
+                    Label(String(localized: "登录"), systemImage: "person.crop.circle")
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .frame(width: 62, height: 26)
+                        .contentShape(Capsule())
                 }
-            .padding(14)
-            .presentationBackground(.ultraThinMaterial)
+                .buttonStyle(StablePressButtonStyle())
+                .foregroundStyle(Color.accentColor)
+                .glassEffect(.regular.interactive(), in: Capsule())
+                .help(message)
+            }
         }
+    }
+}
+
+private struct SystemDownloadErrorPopoverAnchor: NSViewRepresentable {
+    let message: String
+    @Binding var isPresented: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        PassthroughPopoverAnchorView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if isPresented {
+            context.coordinator.present(message: message, relativeTo: nsView)
+        } else {
+            context.coordinator.dismiss()
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.dismiss()
+    }
+
+    final class Coordinator: NSObject {
+        private let popover: NSPopover = {
+            let value = NSPopover()
+            value.behavior = .applicationDefined
+            value.animates = true
+            return value
+        }()
+        private var displayedMessage = ""
+
+        func present(message: String, relativeTo anchor: NSView) {
+            guard anchor.window != nil else { return }
+            if displayedMessage != message || popover.contentViewController == nil {
+                let controller = NSHostingController(rootView: DownloadErrorPopoverContent(message: message))
+                controller.view.layoutSubtreeIfNeeded()
+                let fitting = controller.view.fittingSize
+                popover.contentSize = NSSize(width: max(360, fitting.width),
+                                             height: min(max(80, fitting.height), 260))
+                popover.contentViewController = controller
+                displayedMessage = message
+            }
+            guard !popover.isShown else { return }
+            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+            // 保留系统 NSPopover 的样式与窗口层级，但让点击直接穿透给下方按钮。
+            popover.contentViewController?.view.window?.ignoresMouseEvents = true
+        }
+
+        func dismiss() {
+            if popover.isShown { popover.performClose(nil) }
+        }
+    }
+}
+
+private final class PassthroughPopoverAnchorView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+private struct DownloadErrorPopoverContent: View {
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(String(localized: "下载失败"), systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+                .foregroundStyle(.yellow)
+
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(14)
+        .frame(width: 360, alignment: .leading)
     }
 }
 
@@ -7148,8 +7490,8 @@ private struct SidebarActionButtonStyleModifier: ViewModifier {
     }
 }
 
-private struct StablePressButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
+private struct StablePressButtonStyle: SwiftUI.ButtonStyle {
+    func makeBody(configuration: SwiftUI.ButtonStyleConfiguration) -> some View {
         configuration.label
     }
 }
@@ -7429,12 +7771,18 @@ private struct SettingsGroupDivider: View {
 }
 
 private struct SettingsAccountActionsBar: View {
+    let onRelogin: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
     var isSelected: Bool = false
 
     var body: some View {
         HStack(spacing: 0) {
+            SettingsAccountActionButton(systemImage: "arrow.clockwise",
+                                        tint: .accentColor,
+                                        size: 13,
+                                        help: String(localized: "登录"),
+                                        action: onRelogin)
             SettingsAccountActionButton(systemImage: "square.and.pencil",
                                         tint: .secondary,
                                         size: 13,
@@ -7477,21 +7825,30 @@ private struct SettingsAccountActionButton: View {
                 isHovered = hovering
             }
         }
+        .help(help)
     }
 }
 
 enum AccountEditorContext: Identifiable {
     case new
     case edit(StoredAccount)
+    case relogin(StoredAccount)
     var id: String {
         switch self {
         case .new: return "new"
         case .edit(let account): return account.id.uuidString
+        case .relogin(let account): return "relogin-\(account.id.uuidString)"
         }
     }
     var account: StoredAccount? {
-        if case .edit(let account) = self { return account }
-        return nil
+        switch self {
+        case .new: return nil
+        case .edit(let account), .relogin(let account): return account
+        }
+    }
+    var isRelogin: Bool {
+        if case .relogin = self { return true }
+        return false
     }
 }
 
@@ -7530,6 +7887,7 @@ struct AccountSettingsView: View {
                     } else {
                         ForEach(Array(accountStore.accounts.enumerated()), id: \.element.id) { index, account in
                             AccountSettingsRow(account: account,
+                                               onRelogin: { editor = .relogin(account) },
                                                onEdit: { editor = .edit(account) },
                                                onDelete: { accountPendingDeletion = account })
                             if index < accountStore.accounts.count - 1 {
@@ -7567,7 +7925,9 @@ struct AccountSettingsView: View {
         }
         .onAppear {
             deviceGUID = DeviceGUIDStore.current()
+            presentRequestedRelogin()
         }
+        .onChange(of: accountStore.reloginRequestID) { _, _ in presentRequestedRelogin() }
         .sheet(item: $editor) { context in
             AccountEditorView(context: context)
                 .environmentObject(accountStore)
@@ -7590,6 +7950,13 @@ struct AccountSettingsView: View {
         } message: { account in
             Text(String(localized: "将从本机移除 \(account.displayLabel)。"))
         }
+    }
+
+    private func presentRequestedRelogin() {
+        guard let id = accountStore.reloginRequestID,
+              let account = accountStore.accounts.first(where: { $0.id == id }) else { return }
+        accountStore.reloginRequestID = nil
+        editor = .relogin(account)
     }
 }
 
@@ -7648,6 +8015,7 @@ private struct AccountSettingsEmptyState: View {
 struct AccountSettingsRow: View {
     @EnvironmentObject private var accountStore: AccountStore
     let account: StoredAccount
+    let onRelogin: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
 
@@ -7672,7 +8040,8 @@ struct AccountSettingsRow: View {
 
             Spacer(minLength: 12)
 
-            SettingsAccountActionsBar(onEdit: onEdit, onDelete: onDelete, isSelected: isSelected)
+            SettingsAccountActionsBar(onRelogin: onRelogin, onEdit: onEdit,
+                                      onDelete: onDelete, isSelected: isSelected)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 5)
@@ -7790,7 +8159,9 @@ struct AccountEditorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(editingID == nil ? String(localized: "添加 Apple 账户") : String(localized: "编辑 Apple 账户"))
+            Text(context.isRelogin
+                 ? String(localized: "登录") + " · " + (context.account?.displayLabel ?? "")
+                 : (editingID == nil ? String(localized: "添加 Apple 账户") : String(localized: "编辑 Apple 账户")))
                 .font(.title3.weight(.semibold))
 
             VStack(spacing: 0) {
@@ -7857,9 +8228,10 @@ struct AccountEditorView: View {
                         .keyboardShortcut(.defaultAction)
                         .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 } else {
-                    Button(String(localized: "保存")) {
+                    Button(context.isRelogin ? String(localized: "登录") : String(localized: "保存")) {
                         accountStore.validate(email: email, password: password,
-                                              editingID: editingID, fallbackCountry: selectedCountryCode)
+                                              editingID: editingID, fallbackCountry: selectedCountryCode,
+                                              forceFreshLogin: context.isRelogin)
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
