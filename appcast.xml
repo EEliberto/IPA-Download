@@ -3,6 +3,21 @@
     <channel>
         <title>Pastel</title>
         <item>
+            <title>20260828</title>
+            <pubDate>Fri, 28 Aug 2026 14:01:03 +0800</pubDate>
+            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel20260828</link>
+            <sparkle:version>20260828</sparkle:version>
+            <sparkle:shortVersionString>20260828</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:criticalUpdate/>
+            <description sparkle:format="markdown"><![CDATA[## 简体中文
+
+尝试修复了登陆错误，逻辑参考 ([https://github.com/maksimryabkin/ipatool-sapfix](https://github.com/maksimryabkin/ipatool-sapfix))。由于端口改变，如果输入 Apple 账户密码错误，则 App 已经无法判断到底是密码错误还是需要 2FA 双重认证密钥，因此请确保 Apple 账户密码正确。且由于依赖 macOS 自带的 StoreServices 服务，因此请确保 macOS 为真正的 Mac，而非虚拟机，否则依然无法登陆。
+]]></description>
+            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel20260828/Pastel-20260828.dmg" length="54974960" type="application/octet-stream" sparkle:edSignature="Mg0aes+ntnIczydOy82b5CfXqY8ioxMJAvQRbsahhYDKX6Ay8fUX+G2Bi6p01KMYNd+uOzuEll+OENnDocMvAw=="/>
+        </item>
+        <item>
             <title>26.7.1</title>
             <pubDate>Mon, 27 Jul 2026 16:12:00 +0800</pubDate>
             <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel10</link>
