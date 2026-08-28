@@ -565,6 +565,46 @@
     "Apple 服务器暂时不可用。请稍后再试。" : {
 
     },
+    "Apple 无法区分密码错误与双重认证。请检查密码；如果已收到验证码，也可以直接输入。" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple cannot distinguish an incorrect password from a two-factor authentication challenge. Check the password first; if you received a code, you can enter it instead."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Appleの応答では、パスワードの誤りと2ファクタ認証を区別できません。まずパスワードを確認し、コードを受信済みの場合は入力してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 응답만으로는 잘못된 암호와 이중 인증을 구분할 수 없습니다. 먼저 암호를 확인하고, 코드를 받았다면 입력하세요."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การตอบกลับของ Apple ไม่สามารถแยกรหัสผ่านที่ไม่ถูกต้องออกจากการยืนยันสองชั้นได้ โปรดตรวจสอบรหัสผ่านก่อน หรือป้อนรหัสหากได้รับแล้ว"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 無法區分密碼錯誤與雙重驗證。請檢查密碼；如果已收到驗證碼，也可以直接輸入。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 無法區分密碼錯誤與雙重認證。請檢查密碼；如果已收到驗證碼，也可以直接輸入。"
+          }
+        }
+      }
+    },
     "Apple 账户" : {
       "localizations" : {
         "en" : {
@@ -1109,6 +1149,7 @@
       }
     },
     "下载失败" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7721,7 +7762,6 @@
       }
     },
     "登录" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -9931,41 +9971,8 @@
         }
       }
     },
-    "验证码已发送至你的受信任 Apple 设备，请输入双重认证验证码。" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "A code was sent to your trusted Apple devices. Enter the two-factor verification code."
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "確認コードを信頼できるAppleデバイスに送信しました。2ファクタ認証コードを入力してください。"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "신뢰할 수 있는 Apple 기기로 코드를 보냈습니다. 이중 인증 코드를 입력하세요."
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ส่งรหัสไปยังอุปกรณ์ Apple ที่เชื่อถือได้ของคุณแล้ว กรุณาป้อนรหัสยืนยันสองชั้น"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "驗證碼已傳送至你的受信任 Apple 裝置，請輸入雙重認證驗證碼。"
-          }
-        }
-      }
-    },
     "验证码已发送至你的受信任 Apple 设备。输入后将完成双重认证并继续。" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {

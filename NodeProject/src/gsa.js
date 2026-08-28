@@ -1,57 +1,54 @@
-// Apple GrandSlam (GSA) 登录：SRP-6a + Anisette + 2FA，最终换取 StoreServices 令牌。
-// Apple 已停用旧的明文密码登录，此模块对齐 SideStore/apple-private-apis 的可用流程。
+// Apple StoreServices 登录：直接使用原生认证端点，通过 SAP 签名（X-Apple-ActionSignature）绕过 HTTP 403。
+// 修复方案精确对齐 ipatool-sapfix（pkg/appstore/appstore_login.go）。
 //
-// HTTP 一律走系统 curl：
-//   - gsa.apple.com 在部分网络环境（如开启 TLS 解密的代理）下会被 MITM，Node 自带 CA 校验会失败；
-//     curl 配合系统代理(CONNECT 隧道)能拿到真实 Apple 证书。
-//   - 自动读取 macOS 系统代理(scutil --proxy)并传给 curl。
+// 关键对齐点：
+//   1. Content-Type: application/x-www-form-urlencoded，但 body 是 plist XML（与 ipatool-sapfix 一致）
+//   2. SAP 签名作用于 plist body，写入 X-Apple-ActionSignature header
+//   3. 302 redirect：用 attempt=1 的原始 body 重发到 Location URL（不递增 attempt）
+//   4. fallback：只有在使用 native 端点且返回 204/403/404/503 时，递归用 legacy 端点重试
+//   5. attempt 递增：仅在 attempt==1 且 failureType==-5000（FailureTypeInvalidCredentials）时重试
+//
+// HTTP 走系统 curl（避免 Node 自带 CA 在 TLS 解密代理下失败）。
 import crypto from 'crypto';
 import os from 'os';
 import path from 'path';
 import {execFileSync} from 'child_process';
 import {writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync} from 'fs';
+import {fileURLToPath} from 'url';
 import plist from 'plist';
 import {t} from './i18n.js';
 
-function needs2faError() {
-    const e = new Error(t('needs_2fa'));
-    e.code = 'NEEDS_2FA';
+// ---- 错误工厂 ----
+function ambiguousAuthError() {
+    const e = new Error(t('auth_or_2fa'));
+    e.code = 'AUTH_OR_2FA';
     return e;
 }
 
+// ---- 常量 ----
 const CURL = '/usr/bin/curl';
 const SCUTIL = '/usr/sbin/scutil';
-const GSA_ENDPOINT = 'https://gsa.apple.com/grandslam/GsService2';
-const STORE_AUTH_URL = 'https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate';
-const DEFAULT_NATIVE_AUTH_URL = 'https://auth.itunes.apple.com/auth/v1/native/fast/';
-// 多个公共 anisette 服务器做兜底（取自 SideStore 官方推荐列表）；单个挂了就换下一个。
-// 可用 ANISETTE_SERVER 环境变量在最前面插入自定义服务器。
-const ANISETTE_SERVERS = [
-    ...(process.env.ANISETTE_SERVER ? [process.env.ANISETTE_SERVER] : []),
-    'https://ani.sidestore.io',
-    'https://ani.f1sh.me',
-    'https://ani.npeg.us',
-    'https://ani.sidestore.app',
-    'https://ani.846969.xyz',
-    'https://anisette.wedotstud.io',
-    'https://ani.neoarz.com',
-    'https://ani3server.fly.dev',
-    'https://ani.jaydenha.uk',
-    'https://anisette.crystall1ne.dev',
-    'https://sideloadly.io/anisette/irGb3Quww8zrhgqnzmrx',
-];
-const GSA_UA = 'akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0';
 const STORE_UA = 'Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6';
 
-// ---- SRP (RFC5054 2048-bit, SHA-256), 对齐 srp v0.6.0 ----
-const N = BigInt('0x' + 'AC6BDB41324A9A9BF166DE5E1389582FAF72B6651987EE07FC3192943DB56050A37329CBB4A099ED8193E0757767A13DD52312AB4B03310DCD7F48A9DA04FD50E8083969EDB767B0CF6095179A163AB3661A05FBD5FAAAE82918A9962F0B93B855F97993EC975EEAA80D740ADBF4FF747359D041D5C33EA71D281E446B14773BCA97B43A23FB801676BD207A436C6481F1D2B9078717461A5B9D32E688F87748544523B524B0D57D5EA77A2775D2ECFA032CFBDBF52FB3786160279004E57AE6AF874E7303CE53299CCC041C7BC308D82A5698F3A8D0C38271AE35F8E9DBFBB694B5C803D89F7AE435DE236D525F54759B65E372FCD68EF20FA7111F9E4AFF73');
-const g = 2n;
-const modpow = (b, e, m) => { let r = 1n; b %= m; if (b < 0n) b += m; while (e > 0n) { if (e & 1n) r = r * b % m; e >>= 1n; b = b * b % m; } return r; };
-const toBuf = (x) => { let h = x.toString(16); if (h.length % 2) h = '0' + h; return Buffer.from(h, 'hex'); };
-const toBI = (buf) => (buf.length ? BigInt('0x' + buf.toString('hex')) : 0n);
-const padL = (buf, len) => Buffer.concat([Buffer.alloc(len - buf.length), buf]);
-const sha256 = (...parts) => { const h = crypto.createHash('sha256'); for (const p of parts) h.update(p); return h.digest(); };
+// 对齐 ipatool-sapfix/pkg/appstore/constants.go
+const FAILURE_TYPE_INVALID_CREDENTIALS = '-5000'; // 对应 FailureTypeInvalidCredentials
+const CUSTOMER_MESSAGE_BAD_LOGIN       = 'MZFinance.BadLogin.Configurator_message';
+const CUSTOMER_MESSAGE_ACCOUNT_DISABLED = 'Your account is disabled.';
 
+// 对齐 ipatool-sapfix/pkg/http/constants.go
+const HEADER_SAP_SIGNATURE = 'X-Apple-ActionSignature';
+
+// 对齐 ipatool-sapfix/pkg/appstore/appstore_login.go legacyAuthenticateEndpoint
+const LEGACY_AUTH_URL = 'https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate';
+
+// 对齐 ipatool-sapfix/pkg/appstore/appstore_login.go
+const DEFAULT_NATIVE_AUTH_BASE = 'https://auth.itunes.apple.com/auth/v1/native/fast/';
+
+// SAP signer 路径
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_SAP_SIGNER = path.resolve(MODULE_DIR, '..', '..', 'sap-signer');
+
+// ---- 临时目录 ----
 let _tmpDir = null;
 function tmpDir() {
     if (!_tmpDir) _tmpDir = mkdtempSync(path.join(os.tmpdir(), 'ipa-gsa-'));
@@ -61,6 +58,7 @@ export function cleanup() {
     if (_tmpDir) { rmSync(_tmpDir, {recursive: true, force: true}); _tmpDir = null; }
 }
 
+// ---- 系统代理 ----
 function systemProxy() {
     try {
         const out = execFileSync(SCUTIL, ['--proxy'], {timeout: 5000}).toString();
@@ -74,12 +72,12 @@ function systemProxy() {
 
 export const STORE_USER_AGENT = STORE_UA;
 
-// 通用 curl 请求；headers 为 {k:v}，返回 {status, headers, body}
+// ---- 通用 curl 请求 ----
 // jar：cookie 文件路径，传入则读写 cookie（authenticate 与后续下载/购买共享会话）。
 export function curlRequest(method, url, {headers = {}, body = null, follow = false, timeout = 30, jar = null} = {}) {
     const dir = tmpDir();
     const outFile = path.join(dir, `out-${crypto.randomBytes(4).toString('hex')}.bin`);
-    const hdrFile = path.join(dir, 'hdr.txt');
+    const hdrFile = path.join(dir, `hdr-${crypto.randomBytes(4).toString('hex')}.txt`);
     const args = ['-s', '-m', String(timeout), '-X', method, url,
         '-o', outFile, '-D', hdrFile, '-w', '%{http_code}'];
     if (jar) args.push('-b', jar, '-c', jar);
@@ -88,7 +86,7 @@ export function curlRequest(method, url, {headers = {}, body = null, follow = fa
     if (proxy) args.push('--proxy', proxy);
     for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
     if (body !== null) {
-        const bodyFile = path.join(dir, 'body.bin');
+        const bodyFile = path.join(dir, `body-${crypto.randomBytes(4).toString('hex')}.bin`);
         writeFileSync(bodyFile, body);
         args.push('--data-binary', `@${bodyFile}`);
     }
@@ -105,34 +103,57 @@ function headerValue(rawHeaders, name) {
     return m ? m[1].trim() : '';
 }
 
-function podPrefix(pod) {
-    return pod ? `p${pod}-` : '';
+// ---- SAP 签名（对齐 mescal.Sign） ----
+function sapSignerPath() {
+    return process.env.IPA_SAP_SIGNER || DEFAULT_SAP_SIGNER;
 }
 
-function storeAuthURL(guid, pod = '') {
-    return `https://${podPrefix(pod)}buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate?guid=${encodeURIComponent(guid)}`;
-}
-
-function nativeAuthURL(endpoint, guid) {
-    const url = new URL(endpoint);
-    url.searchParams.set('guid', guid);
-    return url.toString();
-}
-
-function normalizeAuthEndpoint(raw) {
+function signAppleAction(bodyBytes) {
+    const signer = sapSignerPath();
+    if (!existsSync(signer)) {
+        throw new Error(`缺少 Apple SAP 签名组件：${signer}`);
+    }
     try {
-        const url = new URL(raw);
-        if (url.hostname === 'auth.itunes.apple.com') {
-            let pathname = url.pathname.replace(/\/+$/, '');
-            if (!pathname.endsWith('/fast')) pathname += '/fast';
-            url.pathname = `${pathname}/`;
+        const output = execFileSync(signer, [], {
+            input: bodyBytes,
+            encoding: 'utf8',
+            maxBuffer: 1024 * 1024,
+            timeout: 35_000,
+        }).trim();
+        if (!/^[A-Za-z0-9+/]+=*$/.test(output)) {
+            throw new Error('签名组件返回了无效数据');
         }
-        return url.toString();
-    } catch {
-        return DEFAULT_NATIVE_AUTH_URL;
+        return Buffer.from(output, 'base64');
+    } catch (error) {
+        const stderr = Buffer.isBuffer(error?.stderr)
+            ? error.stderr.toString('utf8').trim()
+            : String(error?.stderr || '').trim();
+        const detail = stderr || error.message || String(error);
+        throw new Error(`Apple SAP 签名失败：${detail}`);
     }
 }
 
+// 对齐 client.go Send() 中的 SignAction 处理
+export function buildSignedAuthenticationHeaders(baseHeaders, body, signer = signAppleAction) {
+    const bodyBytes = Buffer.isBuffer(body) ? body : Buffer.from(body);
+    const signature = signer(bodyBytes);
+    if (!Buffer.isBuffer(signature) || signature.length === 0) {
+        throw new Error('Apple SAP 签名为空');
+    }
+    return {...baseHeaders, [HEADER_SAP_SIGNATURE]: signature.toString('base64')};
+}
+
+// ---- URL 规范化（对齐 authenticateURL()） ----
+// Apple native 端点路径末尾必须有斜杠，否则会被 redirect/drop。
+function authenticateURL(endpoint) {
+    if (!endpoint) return endpoint;
+    if (endpoint.includes('/native/') && !endpoint.endsWith('/')) {
+        return endpoint + '/';
+    }
+    return endpoint;
+}
+
+// ---- bag.xml 获取 native auth 端点（对齐 Bag()） ----
 function extractPlistText(text) {
     const start = text.indexOf('<plist');
     const end = text.indexOf('</plist>');
@@ -142,27 +163,164 @@ function extractPlistText(text) {
 
 function fetchNativeAuthEndpoint(guid) {
     try {
-        const url = new URL('https://init.itunes.apple.com/bag.xml');
-        url.searchParams.set('guid', guid);
-        const {status, body} = curlRequest('GET', url.toString(), {
+        const url = `https://init.itunes.apple.com/bag.xml?guid=${encodeURIComponent(guid)}`;
+        const {status, body} = curlRequest('GET', url, {
             headers: {'User-Agent': STORE_UA, Accept: 'application/xml'},
             follow: true,
             timeout: 20,
         });
-        if (status < 200 || status >= 300) return DEFAULT_NATIVE_AUTH_URL;
+        if (status < 200 || status >= 300) return DEFAULT_NATIVE_AUTH_BASE;
         const parsed = plist.parse(extractPlistText(body.toString('utf8')));
-        const urlBag = parsed?.urlBag || {};
-        const authURL = parsed?.authenticateAccount || urlBag.authenticateAccount;
-        return authURL ? normalizeAuthEndpoint(authURL) : DEFAULT_NATIVE_AUTH_URL;
+        const authURL = parsed?.urlBag?.authenticateAccount || parsed?.authenticateAccount;
+        if (!authURL) return DEFAULT_NATIVE_AUTH_BASE;
+        // 规范化尾部斜杠
+        return authenticateURL(authURL);
     } catch {
-        return DEFAULT_NATIVE_AUTH_URL;
+        return DEFAULT_NATIVE_AUTH_BASE;
     }
 }
 
-function podFromHeaders(rawHeaders) {
-    return headerValue(rawHeaders, 'pod') || (rawHeaders.match(/Pod=(\d+)/) || [])[1] || '';
+// ---- 构建登录请求参数（对齐 loginRequest().Payload.Content） ----
+// 注意：plist.build() 序列化为 XML plist，但 Content-Type 为 application/x-www-form-urlencoded
+// 这是 ipatool-sapfix 的 XMLPayload 行为（参见 payload.go）。
+export function buildLoginBody(email, password, code, guid, attempt) {
+    return plist.build({
+        appleId: email,
+        attempt: String(attempt),
+        guid,
+        password: `${password}${String(code || '').replace(/\s+/g, '')}`,
+        rmp: '0',
+        why: 'signIn',
+    });
 }
 
+// ---- 发送单次带 SAP 签名的 POST（不自动跟随 redirect） ----
+// 对齐 client.go NewClient() 中的 CheckRedirect: ErrUseLastResponse（auth URL 不自动跟随）
+function postWithSAP(url, body, jar) {
+    const baseHeaders = {
+        'User-Agent': STORE_UA,
+        // 对齐 loginRequest() Headers: {"Content-Type": "application/x-www-form-urlencoded"}
+        // body 是 plist XML，但 Content-Type 是 form-urlencoded（ipatool-sapfix 的准确行为）
+        'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    const headers = buildSignedAuthenticationHeaders(baseHeaders, body);
+    return curlRequest('POST', url, {headers, body, follow: false, timeout: 30, jar});
+}
+
+// ---- 判断是否应 fallback 到 legacy 端点（对齐 shouldRetryWithLegacyAuthenticate()） ----
+// 只有在使用 native endpoint（含 /native/）时才 fallback。
+export function shouldRetryWithLegacyAuthenticate(endpoint, status) {
+    if (!endpoint.includes('/native/')) return false;
+    return [204, 403, 404, 503].includes(Number(status));
+}
+
+// ---- 核心登录循环（精确对齐 login() for 循环）----
+//
+// ipatool-sapfix 逻辑：
+//   for attempt := 1; retry && attempt <= 4; attempt++ {
+//       requestAttempt = attempt
+//       if redirect != "" { requestAttempt = 1 }  // redirect 时不递增 attempt
+//       request = loginRequest(email, pwd, code, guid, endpoint, requestAttempt)
+//       request.URL = redirect || request.URL    // redirect 时用 redirect URL，清空 redirect
+//       parseLoginResponse(&res, attempt, authCode) -> (retry, redirect, err)
+//   }
+//
+function storePasswordAuthenticate(email, password, code, guid, jar, endpoint) {
+    let redirect = '';
+    let retry = true;
+    let res = null;
+
+    for (let attempt = 1; retry && attempt <= 4; attempt++) {
+        // 对齐：redirect 时 requestAttempt 保持 1，用原 body 重发
+        const requestAttempt = redirect !== '' ? 1 : attempt;
+        const body = buildLoginBody(email, password, code, guid, requestAttempt);
+
+        const targetURL = redirect !== '' ? redirect : authenticateURL(endpoint);
+        redirect = ''; // 清空，对齐：request.URL, _ = util.IfEmpty(redirect, request.URL), ""
+
+        res = postWithSAP(targetURL, body, jar);
+
+        // shouldRetryWithLegacyAuthenticate：native 端点 + 204/403/404/503 → 递归用 legacy 重试
+        if (shouldRetryWithLegacyAuthenticate(endpoint, res.status)) {
+            return storePasswordAuthenticate(email, password, code, guid, jar, LEGACY_AUTH_URL);
+        }
+
+        // parseLoginResponse 逻辑
+        const parsed = parseLoginResponse(res, attempt, code);
+        retry = parsed.retry;
+        redirect = parsed.redirect;
+        if (parsed.error) throw parsed.error;
+        if (!retry) {
+            // 登录成功，返回解析出的数据
+            return {res, parsed: parsed.data};
+        }
+    }
+
+    if (retry) {
+        // too many attempts
+        throw new Error(t('store_token_failed'));
+    }
+
+    throw new Error(t('store_token_failed'));
+}
+
+// 对齐 parseLoginResponse()
+export function parseLoginResponse(res, attempt, authCode) {
+    const status = res.status;
+
+    // 302 redirect：返回 Location，重发
+    if (status === 302 || status === 301) {
+        const location = headerValue(res.headers, 'location');
+        if (location) {
+            return {retry: true, redirect: location, error: null, data: null};
+        }
+    }
+
+    // 非重定向但也不是成功响应，尝试解析 plist
+    let parsed = null;
+    if (res.body && res.body.length > 0) {
+        try { parsed = parsePlistLoose(res.body, t('ctx_store_login_resp')); } catch { /* ignore */ }
+    }
+
+    if (!parsed) {
+        // 无法解析 plist，视为服务端错误
+        return {retry: false, redirect: '', error: new Error(t('store_token_failed')), data: null};
+    }
+
+    const failureType = String(parsed.failureType || '');
+    const customerMessage = String(parsed.customerMessage || '');
+
+    // attempt==1 且 failureType==-5000（FailureTypeInvalidCredentials）→ 重试
+    if (attempt === 1 && failureType === FAILURE_TYPE_INVALID_CREDENTIALS) {
+        return {retry: true, redirect: '', error: null, data: null};
+    }
+
+    // Apple 对错误密码和 2FA 挑战都会返回同一个 Configurator_message，
+    // 不能在这里武断地将它归类为 2FA。
+    if (failureType === '' && !authCode && customerMessage === CUSTOMER_MESSAGE_BAD_LOGIN) {
+        return {retry: false, redirect: '', error: ambiguousAuthError(), data: null};
+    }
+
+    // failureType=="" && customerMessage=="Your account is disabled."
+    if (failureType === '' && customerMessage === CUSTOMER_MESSAGE_ACCOUNT_DISABLED) {
+        return {retry: false, redirect: '', error: new Error(t('wrong_password')), data: null};
+    }
+
+    // failureType != "" → 错误
+    if (failureType !== '') {
+        const msg = customerMessage || t('store_token_failed');
+        return {retry: false, redirect: '', error: new Error(msg), data: null};
+    }
+
+    // 成功条件：有 passwordToken 和 dsPersonId
+    if (status !== 200 || !parsed.passwordToken || !parsed.dsPersonId) {
+        return {retry: false, redirect: '', error: new Error(t('store_token_failed')), data: null};
+    }
+
+    return {retry: false, redirect: '', error: null, data: parsed};
+}
+
+// ---- plist 解析（宽松）----
 export function parsePlistLoose(buf, context = t('ctx_apple_resp')) {
     let xml = buf.toString('utf8').trim();
     if (!xml) throw new Error(t('empty_resp', {context}));
@@ -172,229 +330,22 @@ export function parsePlistLoose(buf, context = t('ctx_apple_resp')) {
     return plist.parse(xml);
 }
 
-function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+// ---- 对外暴露的登录入口（对齐 Login() → login()） ----
+export async function storeLogin(email, password, code, guid, cookieText = '', pod = '') {
+    const jar = path.join(tmpDir(), `store-cookies-${crypto.createHash('sha256').update(String(email || '')).digest('hex').slice(0, 12)}.txt`);
+    if (cookieText) writeFileSync(jar, cookieText);
 
-// 取 anisette 设备标识：遍历所有服务器，全部失败再整体重试一遍（公共服务器经常临时 5xx）。
-async function fetchAnisette() {
-    let lastErr = null;
-    for (let pass = 0; pass < 2; pass++) {
-        for (const server of ANISETTE_SERVERS) {
-            try {
-                const {status, body} = curlRequest('GET', server, {timeout: 12});
-                if (status !== 200) { lastErr = new Error(`anisette ${server} HTTP ${status}`); continue; }
-                const ani = JSON.parse(body.toString('utf8'));
-                if (ani['X-Apple-I-MD'] && ani['X-Apple-I-MD-M']) return ani;
-                lastErr = new Error(t('anisette_missing_fields', {server}));
-            } catch (e) { lastErr = e; }
-        }
-        if (pass === 0) await sleep(700);
-    }
-    throw new Error(t('anisette_failed', {msg: lastErr ? lastErr.message : t('unknown_error')}));
-}
+    // 从 bag.xml 获取 native 端点（对齐 Bag() 的调用方式）
+    const nativeEndpoint = fetchNativeAuthEndpoint(guid);
 
-function cpdFromAnisette(ani) {
-    return {
-        'X-Apple-I-Client-Time': ani['X-Apple-I-Client-Time'],
-        'X-Apple-I-MD': ani['X-Apple-I-MD'],
-        'X-Apple-I-MD-LU': ani['X-Apple-I-MD-LU'],
-        'X-Apple-I-MD-M': ani['X-Apple-I-MD-M'],
-        'X-Apple-I-MD-RINFO': ani['X-Apple-I-MD-RINFO'],
-        'X-Apple-I-SRL-NO': ani['X-Apple-I-SRL-NO'],
-        'X-Apple-I-TimeZone': ani['X-Apple-I-TimeZone'],
-        'X-Apple-Locale': ani['X-Apple-Locale'],
-        'X-Mme-Device-Id': ani['X-Mme-Device-Id'],
-        bootstrap: true, icscrec: true, loc: 'en_GB', pbe: false, prkgen: true, svct: 'iCloud',
-    };
-}
+    // 执行登录（storePasswordAuthenticate 内部会按需 fallback 到 legacy）
+    const {res, parsed} = storePasswordAuthenticate(email, password, code, guid, jar, nativeEndpoint);
 
-function gsaPost(bodyObj, ani) {
-    const body = plist.build(bodyObj);
-    const headers = {
-        'Content-Type': 'text/x-xml-plist',
-        'Accept': '*/*',
-        'User-Agent': GSA_UA,
-        'X-MMe-Client-Info': ani['X-MMe-Client-Info'],
-    };
-    // 瞬时错误（网络失败 / 5xx / 限流）重试几次，避免一次抖动就让整个登录失败。
-    let lastStatus = 0;
-    for (let attempt = 0; attempt < 3; attempt++) {
-        const {status, body: respBody} = curlRequest('POST', GSA_ENDPOINT, {headers, body, timeout: 30});
-        if (status === 200) {
-            const parsed = parsePlistLoose(respBody, t('ctx_gsa_resp'));
-            return parsed.Response || parsed;
-        }
-        lastStatus = status;
-        if (![0, 429, 500, 502, 503, 504].includes(status)) break;
-    }
-    throw new Error(t('gsa_http', {status: lastStatus}));
-}
-
-// 完整 SRP 握手，返回解密后的 spd（含 adsid / GsIdmsToken / t.tokens）与 Status。
-function srpLogin(email, password, ani) {
-    const cpd = cpdFromAnisette(ani);
-    const a = BigInt('0x' + crypto.randomBytes(32).toString('hex'));
-    const Abuf = toBuf(modpow(g, a, N));
-
-    const initR = gsaPost({Header: {Version: '1.0.1'}, Request: {A2k: Abuf, cpd, o: 'init', ps: ['s2k', 's2k_fo'], u: email}}, ani);
-    if (initR.Status?.ec !== 0 || !initR.s) {
-        throw new Error(initR.Status?.em || t('gsa_init_failed'));
-    }
-    const salt = initR.s, Bbuf = initR.B, iters = Number(initR.i), cCookie = initR.c;
-    const Bbi = toBI(Bbuf), Btrim = toBuf(Bbi);
-
-    // s2k：x = H(salt | H("" | ":" | PBKDF2(SHA256(pw), salt, iters)))
-    const pwBuf = crypto.pbkdf2Sync(sha256(Buffer.from(password, 'utf8')), salt, iters, 32, 'sha256');
-    const x = toBI(sha256(salt, sha256(Buffer.from(':'), pwBuf)));
-    const k = toBI(sha256(padL(toBuf(N), 256), padL(toBuf(g), 256)));
-    const u = toBI(sha256(Abuf, Btrim));
-    let base = (Bbi - (k * modpow(g, x, N)) % N) % N; if (base < 0n) base += N;
-    const S = toBuf(modpow(base, a + u * x, N));
-    const K = sha256(S);
-
-    const nHash = sha256(padL(toBuf(N), 256));
-    const gHash = sha256(padL(toBuf(g), 256));
-    const xored = Buffer.alloc(32); for (let i = 0; i < 32; i++) xored[i] = gHash[i] ^ nHash[i];
-    const M1 = sha256(xored, sha256(Buffer.from(email, 'utf8')), salt, Abuf, Btrim, K);
-
-    const compR = gsaPost({Header: {Version: '1.0.1'}, Request: {M1, c: cCookie, cpd, o: 'complete', u: email}}, ani);
-    if (compR.Status?.ec !== 0) {
-        // ec -22406 等：密码错误
-        throw new Error(compR.Status?.em || t('wrong_password'));
-    }
-    if (!compR.M2 || Buffer.compare(compR.M2, sha256(Abuf, M1, K)) !== 0) {
-        throw new Error(t('gsa_m2_mismatch'));
-    }
-    const edKey = crypto.createHmac('sha256', K).update('extra data key:').digest();
-    const edIv = crypto.createHmac('sha256', K).update('extra data iv:').digest().subarray(0, 16);
-    const dec = crypto.createDecipheriv('aes-256-cbc', edKey, edIv);
-    const pt = Buffer.concat([dec.update(compR.spd), dec.final()]);
-    const spd = parsePlistLoose(pt, 'spd');
-    return {spd, status: compR.Status};
-}
-
-function build2faHeaders(ani, adsid, gsToken) {
-    const idToken = Buffer.from(`${adsid}:${gsToken}`).toString('base64');
-    return {
-        'X-Apple-I-Client-Time': ani['X-Apple-I-Client-Time'],
-        'X-Apple-I-MD': ani['X-Apple-I-MD'],
-        'X-Apple-I-MD-LU': ani['X-Apple-I-MD-LU'],
-        'X-Apple-I-MD-M': ani['X-Apple-I-MD-M'],
-        'X-Apple-I-MD-RINFO': ani['X-Apple-I-MD-RINFO'],
-        'X-Apple-I-SRL-NO': ani['X-Apple-I-SRL-NO'],
-        'X-Apple-I-TimeZone': ani['X-Apple-I-TimeZone'],
-        'X-Apple-Locale': ani['X-Apple-Locale'],
-        'X-Mme-Device-Id': ani['X-Mme-Device-Id'],
-        'X-Mme-Client-Info': ani['X-MMe-Client-Info'],
-        'X-Apple-App-Info': 'com.apple.gs.xcode.auth',
-        'X-Xcode-Version': '11.2 (11B41)',
-        'Content-Type': 'text/x-xml-plist',
-        'Accept': 'text/x-xml-plist',
-        'User-Agent': 'Xcode',
-        'Accept-Language': 'en-us',
-        'X-Apple-Identity-Token': idToken,
-        'Loc': ani['X-Apple-Locale'],
-    };
-}
-
-function send2faPush(ani, adsid, gsToken) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-        const {status} = curlRequest('GET', 'https://gsa.apple.com/auth/verify/trusteddevice',
-            {headers: build2faHeaders(ani, adsid, gsToken), timeout: 25});
-        if (status >= 200 && status < 300) return true;
-        if (![0, 429, 500, 502, 503, 504].includes(status)) break;
-    }
-    return false;
-}
-
-function validate2fa(ani, adsid, gsToken, code) {
-    const headers = {...build2faHeaders(ani, adsid, gsToken), 'security-code': code};
-    for (let attempt = 0; attempt < 3; attempt++) {
-        const {status, body} = curlRequest('GET', 'https://gsa.apple.com/grandslam/GsService2/validate',
-            {headers, timeout: 25});
-        let vr = null; try { vr = plist.parse(body.toString('utf8')); } catch { /* ignore */ }
-        const ec = vr?.Status?.ec ?? vr?.ec;
-        if (ec === 0) return true;
-        // 明确返回了错误码（如验证码错误）就不重试；只有瞬时网络/5xx 才重试。
-        if (typeof ec === 'number') return false;
-        if (![0, 429, 500, 502, 503, 504].includes(status)) return false;
-    }
-    return false;
-}
-
-// 用 PET 当密码调 MZFinance authenticate，跟随 302 pod 跳转，拿 StoreServices 令牌。
-// jar：cookie 文件，authenticate 会在此种下会话 cookie，供后续下载/购买请求复用。
-function storeAuthenticate(email, pet, ani, adsid, gsToken, guid, jar) {
-    const idToken = Buffer.from(`${adsid}:${gsToken}`).toString('base64');
-    const body = plist.build({appleId: email, attempt: '1', createSession: 'true', guid, password: pet, rmp: '0', why: 'signIn'});
-    const headers = {
-        'User-Agent': STORE_UA,
-        'Content-Type': 'application/x-apple-plist',
-        'X-Apple-I-MD': ani['X-Apple-I-MD'],
-        'X-Apple-I-MD-M': ani['X-Apple-I-MD-M'],
-        'X-Apple-I-MD-RINFO': ani['X-Apple-I-MD-RINFO'],
-        'X-Apple-I-MD-LU': ani['X-Apple-I-MD-LU'],
-        'X-Mme-Device-Id': ani['X-Mme-Device-Id'],
-        'X-Apple-I-Client-Time': ani['X-Apple-I-Client-Time'],
-        'X-Apple-I-TimeZone': ani['X-Apple-I-TimeZone'],
-        'X-Apple-Identity-Token': idToken,
-    };
-    let res = null;
-    for (let attempt = 1; attempt <= 4; attempt++) {
-        res = curlRequest('POST', STORE_AUTH_URL, {headers, body, follow: true, timeout: 30, jar});
-        if (res.status !== 0) break;
-    }
-    const parsed = parsePlistLoose(res.body, t('ctx_store_login_resp'));
-    if (parsed.customerMessage === 'MZFinance.BadLogin.Configurator_message' && !parsed.passwordToken) {
-        throw needs2faError();
-    }
-    if (!parsed.passwordToken || !parsed.dsPersonId) {
-        throw new Error(parsed.customerMessage || t('store_token_failed'));
-    }
+    // 构建用户信息（对齐 login() 返回 Account）
     const storeFront = headerValue(res.headers, 'x-set-apple-store-front');
-    const podFromUrl = (res.headers.match(/Pod=(\d+)/) || [])[1] || '';
-    return {parsed, storeFront, pod: podFromUrl};
-}
-
-// Asspp / ApplePackage 风格的 StoreServices 登录：稳定 guid + 账号密码 + 既有 cookies。
-// 首次登录需要 2FA；之后复用 cookies 轮换 passwordToken，避免重新创建 GSA/anisette 设备。
-function storePasswordAuthenticate(email, password, code, guid, jar) {
-    const body = plist.build({
-        appleId: email,
-        attempt: code ? '2' : '4',
-        guid,
-        password: `${password}${code || ''}`,
-        rmp: '0',
-        why: 'signIn',
-    });
-    const headers = {
-        'User-Agent': STORE_UA,
-        'Content-Type': 'application/x-apple-plist',
-    };
-
-    let res = null;
-    for (let attempt = 1; attempt <= 4; attempt++) {
-        const endpoint = nativeAuthURL(fetchNativeAuthEndpoint(guid), guid);
-        res = curlRequest('POST', endpoint, {headers, body, follow: true, timeout: 30, jar});
-        if (res.status !== 0) break;
-    }
-
-    const parsed = parsePlistLoose(res?.body || Buffer.alloc(0), t('ctx_store_login_resp'));
-    if (String(parsed.failureType || '') === '' && !code && parsed.customerMessage === 'MZFinance.BadLogin.Configurator_message') {
-        throw needs2faError();
-    }
-    if (String(parsed.failureType || '') === '5005') {
-        throw new Error(t('wrong_code'));
-    }
-    if (!parsed.passwordToken || !parsed.dsPersonId) {
-        throw new Error(parsed.customerMessage || t('store_token_failed'));
-    }
-
-    const storeFront = headerValue(res.headers, 'x-set-apple-store-front');
-    return {parsed, storeFront, pod: podFromHeaders(res.headers)};
-}
-
-function userFromStoreAuth(email, parsed, storeFront, pod, jar) {
+    const newPod = headerValue(res.headers, 'pod') || (res.headers.match(/Pod=(\d+)/) || [])[1] || '';
     const dsid = parsed.dsPersonId;
+
     const authHeaders = {
         'X-Dsid': dsid,
         'iCloud-DSID': dsid,
@@ -402,55 +353,19 @@ function userFromStoreAuth(email, parsed, storeFront, pod, jar) {
     };
     if (storeFront) authHeaders['X-Apple-Store-Front'] = storeFront;
 
-    const cookieText = existsSync(jar) ? readFileSync(jar, 'utf8') : '';
+    const cookieOut = existsSync(jar) ? readFileSync(jar, 'utf8') : '';
+
     return {
         accountInfo: parsed.accountInfo || {appleId: email, address: {firstName: '', lastName: ''}},
         dsPersonId: dsid,
         passwordToken: parsed.passwordToken,
-        pod: pod || '',
+        pod: newPod || pod || '',
         authHeaders,
-        cookieText,
+        cookieText: cookieOut,
     };
 }
 
-export async function storeLogin(email, password, code, guid, cookieText = '', pod = '') {
-    const jar = path.join(tmpDir(), `store-cookies-${crypto.createHash('sha256').update(String(email || '')).digest('hex').slice(0, 12)}.txt`);
-    if (cookieText) writeFileSync(jar, cookieText);
-    const {parsed, storeFront, pod: newPod} = storePasswordAuthenticate(email, password, code, guid, jar);
-    return userFromStoreAuth(email, parsed, storeFront, newPod || pod, jar);
-}
-
-// 主入口：返回与旧 Store.login 兼容的 user 对象。
-// code 为空且账号需要 2FA 时，会先向受信任设备推送验证码，并抛出「需要双重验证码」。
-export async function gsaLogin(email, password, code, guid) {
-    const ani = await fetchAnisette();
-
-    let {spd, status} = srpLogin(email, password, ani);
-
-    if (status.au === 'trustedDeviceSecondaryAuth' || status.au === 'secondaryAuth') {
-        if (!code) {
-            send2faPush(ani, spd.adsid, spd.GsIdmsToken);
-            throw needs2faError();
-        }
-        const ok = validate2fa(ani, spd.adsid, spd.GsIdmsToken, code);
-        if (!ok) throw new Error(t('wrong_code'));
-        ({spd, status} = srpLogin(email, password, ani));
-        if (status.au) throw new Error(t('twofa_incomplete'));
-    }
-
-    const pet = spd.t?.['com.apple.gs.idms.pet']?.token;
-    if (!pet) throw new Error(t('no_pet'));
-
-    const jar = path.join(tmpDir(), 'store-cookies.txt');
-    const {parsed, storeFront, pod} = storeAuthenticate(email, pet, ani, spd.adsid, spd.GsIdmsToken, guid, jar);
-
-    const user = userFromStoreAuth(email, parsed, storeFront, pod, jar);
-    if (!parsed.accountInfo) {
-        user.accountInfo = {appleId: email, address: {firstName: spd.fn || '', lastName: spd.ln || ''}};
-    }
-    return user;
-}
-
+// ---- Cookie jar 工具 ----
 // 把缓存的 cookie 文本写回一个临时 jar 文件，返回路径（供复用会话时使用）。
 export function restoreCookieJar(cookieText, seed = 'default') {
     if (!cookieText) return null;

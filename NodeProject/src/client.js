@@ -84,6 +84,11 @@ class Store {
             return await storeLogin(email, password, mfa, this.guid, previousSession?.cookieText || '', previousSession?.pod || '');
         } catch (error) {
             const msg = error.message || String(error);
+            if (error.code === 'AUTH_OR_2FA') {
+                const e = new Error(t('login_auth_or_2fa'));
+                e.code = 'AUTH_OR_2FA';
+                throw e;
+            }
             // 2FA 检测用稳定的 error.code（不依赖文案语言）；保留中文 includes 作为兜底。
             if (error.code === 'NEEDS_2FA' || msg.includes('需要双重验证码')) {
                 const e = new Error(t('login_2fa'));

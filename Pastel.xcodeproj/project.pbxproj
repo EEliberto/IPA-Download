@@ -155,7 +155,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nRES=\"${CODESIGNING_FOLDER_PATH}/Contents/Resources\"\nmkdir -p \"${RES}/NodeProject\" \"${RES}/node/bin\"\n/usr/bin/rsync -a --delete --exclude '.DS_Store' \"${SRCROOT}/NodeProject/\" \"${RES}/NodeProject/\"\n/bin/cp -f \"${SRCROOT}/node/bin/node\" \"${RES}/node/bin/node\"\n/bin/chmod 755 \"${RES}/node/bin/node\"\n/usr/bin/codesign --force --sign - \"${RES}/node/bin/node\"\n/bin/sh \"${SRCROOT}/Scripts/PatchSparkleLocalizations.sh\" \"${CODESIGNING_FOLDER_PATH}\"\n/usr/bin/xattr -cr \"${CODESIGNING_FOLDER_PATH}\" || true\n";
+			shellScript = "set -e\nRES=\"${CODESIGNING_FOLDER_PATH}/Contents/Resources\"\nSAP_ARCH=\"${NATIVE_ARCH_ACTUAL:-arm64}\"\nmkdir -p \"${RES}/NodeProject\" \"${RES}/node/bin\"\n/usr/bin/rsync -a --delete --exclude '.DS_Store' \"${SRCROOT}/NodeProject/\" \"${RES}/NodeProject/\"\n/bin/cp -f \"${SRCROOT}/node/bin/node\" \"${RES}/node/bin/node\"\n/bin/chmod 755 \"${RES}/node/bin/node\"\n/usr/bin/xcrun --sdk macosx clang -fobjc-arc -fblocks -arch \"${SAP_ARCH}\" -mmacosx-version-min=\"${MACOSX_DEPLOYMENT_TARGET}\" -framework Foundation \"${SRCROOT}/Scripts/SAPSigner.m\" -o \"${RES}/sap-signer\"\n/bin/chmod 755 \"${RES}/sap-signer\"\n/usr/bin/codesign --force --sign - \"${RES}/node/bin/node\"\n/usr/bin/codesign --force --sign - \"${RES}/sap-signer\"\n/bin/sh \"${SRCROOT}/Scripts/PatchSparkleLocalizations.sh\" \"${CODESIGNING_FOLDER_PATH}\"\n/usr/bin/xattr -cr \"${CODESIGNING_FOLDER_PATH}\" || true\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -213,7 +213,7 @@
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 20260828;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Pastel/Info.plist;
@@ -221,7 +221,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 26.7.1;
+				MARKETING_VERSION = 20260828;
 				PRODUCT_BUNDLE_IDENTIFIER = com.allenmiao.ipahistorydownload;
 				PRODUCT_NAME = "Pastel";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -236,7 +236,7 @@
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 20260828;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Pastel/Info.plist;
@@ -244,7 +244,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 26.7.1;
+				MARKETING_VERSION = 20260828;
 				PRODUCT_BUNDLE_IDENTIFIER = com.allenmiao.ipahistorydownload;
 				PRODUCT_NAME = "Pastel";
 				SWIFT_EMIT_LOC_STRINGS = YES;

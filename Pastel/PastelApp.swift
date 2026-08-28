@@ -864,7 +864,7 @@ private final class IBeamCursorRectView: NSView {
 }
 
 func ipaIsVerificationChallenge(_ text: String) -> Bool {
-    return text.contains("[2FA]")
+    return text.contains("[2FA]") || text.contains("[AUTH]")
 }
 
 func ipaProgressValue(from text: String) -> Double? {
@@ -892,7 +892,7 @@ func downloadErrorMessage(from log: String) -> String {
     }
 
     if ipaIsVerificationChallenge(text) {
-        return String(localized: "需要完成 Apple 账户双重认证。请输入验证码后继续。")
+        return String(localized: "Apple 无法区分密码错误与双重认证。请检查密码；如果已收到验证码，也可以直接输入。")
     }
     if text.localizedCaseInsensitiveContains("Your password has changed")
         || text.localizedCaseInsensitiveContains("password token is expired")
@@ -937,6 +937,7 @@ func downloadRequiresRelogin(from log: String) -> Bool {
     log.localizedCaseInsensitiveContains("Your password has changed")
         || log.localizedCaseInsensitiveContains("password token is expired")
         || log.contains("本地会话可能已失效")
+        || log.contains("[AUTH]")
 }
 
 private func cleanDownloadErrorDetail(_ line: String) -> String? {
@@ -950,7 +951,7 @@ private func cleanDownloadErrorDetail(_ line: String) -> String? {
             .replacingOccurrences(of: #"""#, with: "")
     }
     value = value
-        .replacingOccurrences(of: #"\s*\[(?:X|OK|!|2FA|[^\]]*失败[^\]]*|[^\]]*成功[^\]]*)\]\s*"#, with: " ", options: .regularExpression)
+        .replacingOccurrences(of: #"\s*\[(?:X|OK|!|2FA|AUTH|[^\]]*失败[^\]]*|[^\]]*成功[^\]]*)\]\s*"#, with: " ", options: .regularExpression)
         .replacingOccurrences(of: #"^[^：:]{1,12}[：:]\s*"#, with: "", options: .regularExpression)
         .replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1239,7 +1240,7 @@ final class AccountStore: ObservableObject {
         } else if ipaIsVerificationChallenge(log) {
             isValidating = false
             needsCode = true
-            validationMessage = String(localized: "验证码已发送至你的受信任 Apple 设备，请输入双重认证验证码。")
+            validationMessage = String(localized: "Apple 无法区分密码错误与双重认证。请检查密码；如果已收到验证码，也可以直接输入。")
         } else {
             isValidating = false
             needsCode = false
@@ -2177,16 +2178,22 @@ struct ContentView: View {
                 downloads.remove(id: Self.versionIDsFetchJobKey)
             }
         }
-        .alert(String(localized: "双重认证"), isPresented: $showingVerificationPrompt) {
+        .alert(String(localized: "登录"), isPresented: $showingVerificationPrompt) {
             TextField(String(localized: "验证码"), text: $pendingVerificationCode)
             Button(String(localized: "继续")) {
                 submitVerificationCode()
             }
+            Button(String(localized: "登录")) {
+                pendingVerificationCode = ""
+                pendingCodeJobID = nil
+                showRelogin()
+            }
             Button(String(localized: "取消"), role: .cancel) {
                 pendingVerificationCode = ""
+                pendingCodeJobID = nil
             }
         } message: {
-            Text(String(localized: "验证码已发送至你的受信任 Apple 设备。输入后将完成双重认证并继续。"))
+            Text(String(localized: "Apple 无法区分密码错误与双重认证。请检查密码；如果已收到验证码，也可以直接输入。"))
         }
     }
 
@@ -7859,7 +7866,7 @@ struct AccountEditorView: View {
 
             if accountStore.needsCode {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(String(localized: "验证码已发送至你的受信任 Apple 设备，请输入双重认证验证码。"))
+                    Text(String(localized: "Apple 无法区分密码错误与双重认证。请检查密码；如果已收到验证码，也可以直接输入。"))
                         .font(.callout.weight(.semibold))
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -7901,6 +7908,12 @@ struct AccountEditorView: View {
                     dismiss()
                 }
                 if accountStore.needsCode {
+                    Button(String(localized: "登录")) {
+                        code = ""
+                        accountStore.validate(email: email, password: password,
+                                              editingID: editingID, fallbackCountry: selectedCountryCode)
+                    }
+                    .disabled(!canSubmit || accountStore.isValidating)
                     Button(String(localized: "继续")) { accountStore.submitCode(code) }
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)

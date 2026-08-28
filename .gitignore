@@ -25,3 +25,9 @@ yarn-error.log*
 # Local environment
 .env
 .env.*
+
+# Local release secrets
+SPARKLE_SIGNING_KEY.md
+
+# Local build workspace
+work/
