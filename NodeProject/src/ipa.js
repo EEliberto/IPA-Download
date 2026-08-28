@@ -10,8 +10,11 @@ import {download} from './downloader.js';
 import {t} from './i18n.js';
 
 const SESSION_TTL_MS = Number(process.env.IPA_SESSION_TTL_MS || 365 * 24 * 60 * 60 * 1000);
-const SESSION_FLOW_VERSION = 'appstore-direct-v1';
-const ACCEPTED_SESSION_FLOW_VERSIONS = new Set([SESSION_FLOW_VERSION, 'gsa-srp-v10']);
+// Every authentication implementation gets its own session generation. Never
+// carry cookies or password tokens across generations: Apple binds parts of
+// the StoreServices session to the authentication flow that created them.
+export const SESSION_FLOW_VERSION = 'appstore-sap-v2';
+const ACCEPTED_SESSION_FLOW_VERSIONS = new Set([SESSION_FLOW_VERSION]);
 
 function appSupportDir() {
     if (process.env.IPA_SESSION_DIR) return process.env.IPA_SESSION_DIR;
@@ -55,15 +58,15 @@ export class Ipa {
         try {
             const raw = await fsPromises.readFile(this.sessionFile, 'utf8');
             return JSON.parse(raw);
-        } catch {
+        } catch (error) {
+            if (error?.code !== 'ENOENT') await this.clearSession();
             return null;
         }
     }
 
     async loadSession() {
-        const session = await this.loadSessionEntry();
-        if (!validSessionFor(this.creds.APPLE_ID, session)) return null;
-        return session.user;
+        const session = await this.loadReusableSessionEntry();
+        return session?.user || null;
     }
 
     async saveSession(user) {
@@ -88,6 +91,20 @@ export class Ipa {
         this.usedCachedSession = false;
     }
 
+    async loadReusableSessionEntry({force = false} = {}) {
+        const session = await this.loadSessionEntry();
+        if (!session) return null;
+
+        // A forced login must start with a clean cookie jar. Invalid, expired,
+        // corrupt, and legacy-flow sessions are removed instead of being fed
+        // into a new StoreServices authentication request.
+        if (force || !validSessionFor(this.creds.APPLE_ID, session)) {
+            await this.clearSession();
+            return null;
+        }
+        return session;
+    }
+
     applyUser(user, usedCachedSession) {
         this.user = user;
         this.auth = {
@@ -99,18 +116,14 @@ export class Ipa {
     }
 
     async login({force = false} = {}) {
-        const previousSessionEntry = await this.loadSessionEntry();
-        const previousSession = previousSessionEntry?.user || null;
-        if (!force) {
-            const cachedUser = validSessionFor(this.creds.APPLE_ID, previousSessionEntry) ? previousSession : null;
-            if (cachedUser) {
-                console.log(t('login_local_session', {id: this.creds.APPLE_ID}));
-                this.applyUser(cachedUser, true);
-                return;
-            }
+        const reusableSession = await this.loadReusableSessionEntry({force});
+        if (reusableSession) {
+            console.log(t('login_local_session', {id: this.creds.APPLE_ID}));
+            this.applyUser(reusableSession.user, true);
+            return;
         }
 
-        const user = await Store.login(this.creds.APPLE_ID, this.creds.PASSWORD, this.creds.CODE, previousSession);
+        const user = await Store.login(this.creds.APPLE_ID, this.creds.PASSWORD, this.creds.CODE, null);
         console.log(t('login_success', {name: `${user.accountInfo.address.firstName} ${user.accountInfo.address.lastName}`}));
         this.applyUser(user, false);
         await this.saveSession(user).catch(error => {

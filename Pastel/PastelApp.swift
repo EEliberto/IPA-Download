@@ -565,6 +565,66 @@ enum CredentialVault {
     }
 }
 
+private enum StoreSessionMigration {
+    // Must stay in sync with NodeProject/src/ipa.js. This generation is not
+    // compatible with gsa-srp-v10, gsa-srp-v11, or appstore-direct-v1.
+    private static let currentFlowVersion = "appstore-sap-v2"
+
+    static func invalidateLegacySessions() -> Bool {
+        let fileManager = FileManager.default
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: sessionsDirectoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return false
+        }
+
+        var removedAny = false
+        for file in files where file.pathExtension.lowercased() == "json" {
+            let flowVersion: String? = {
+                guard let data = try? Data(contentsOf: file),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else {
+                    return nil
+                }
+                return object["flowVersion"] as? String
+            }()
+
+            guard flowVersion != currentFlowVersion else { continue }
+            if (try? fileManager.removeItem(at: file)) != nil {
+                removedAny = true
+            }
+        }
+        return removedAny
+    }
+
+    static func deleteSession(for appleAccount: String) {
+        let normalized = appleAccount
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return }
+        let digest = SHA256.hash(data: Data(normalized.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        try? FileManager.default.removeItem(
+            at: sessionsDirectoryURL.appendingPathComponent("\(digest).json")
+        )
+    }
+
+    static func deleteAllSessions() {
+        try? FileManager.default.removeItem(at: sessionsDirectoryURL)
+    }
+
+    private static var sessionsDirectoryURL: URL {
+        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return baseURL
+            .appendingPathComponent(appDisplayName, isDirectory: true)
+            .appendingPathComponent("sessions", isDirectory: true)
+    }
+}
+
 enum NodeRuntimeError: LocalizedError {
     case missingResourceDirectory
     case missingProject(URL)
@@ -1084,11 +1144,16 @@ final class AccountStore: ObservableObject {
     }
 
     func load() {
+        let invalidatedLegacySession = StoreSessionMigration.invalidateLegacySessions()
         do {
             if let creds = try CredentialVault.load() {
                 accounts = creds.accounts
                 selectedAccountID = creds.selectedAccountID ?? accounts.first?.id
                 statusMessage = accounts.isEmpty ? "" : String(localized: "已载入 \(accounts.count) 个 Apple 账户")
+                if invalidatedLegacySession, let selectedAccountID {
+                    statusMessage = String(localized: "Apple 账户会话已失效。请重新登录后再试。")
+                    reloginRequestID = selectedAccountID
+                }
             }
         } catch {
             statusMessage = error.localizedDescription
@@ -1109,10 +1174,12 @@ final class AccountStore: ObservableObject {
     func delete(_ account: StoredAccount) {
         let wasSelected = account.id == selectedAccountID
         try? CredentialVault.deletePassword(for: account.id)
+        StoreSessionMigration.deleteSession(for: account.appleAccount)
         accounts.removeAll { $0.id == account.id }
         guard !accounts.isEmpty else {
             selectedAccountID = nil
             try? CredentialVault.deleteStoredCredentials()
+            StoreSessionMigration.deleteAllSessions()
             statusMessage = String(localized: "已删除 \(account.displayLabel)")
             return
         }
@@ -4582,6 +4649,11 @@ struct ContentView: View {
         accountStore.load()
         let initialCountry = accountStore.selectedAccount?.countryCode ?? selectedCountryCode
         applyStorefrontCountry(initialCountry, reload: false)
+        if accountStore.reloginRequestID != nil {
+            DispatchQueue.main.async {
+                showSettings()
+            }
+        }
 
         if catalog.searchResults.isEmpty && catalog.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             catalog.loadFeatured()

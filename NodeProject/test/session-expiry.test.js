@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import plist from 'plist';
 import {isAuthFailureResponse} from '../src/client.js';
+import {Ipa, SESSION_FLOW_VERSION} from '../src/ipa.js';
 import {
     buildLoginBody,
     buildSignedAuthenticationHeaders,
@@ -90,4 +94,48 @@ test('does not misclassify Apple Configurator bad-login response as definite 2FA
 
     assert.equal(result.error?.code, 'AUTH_OR_2FA');
     assert.notEqual(result.error?.code, 'NEEDS_2FA');
+});
+
+test('invalidates legacy sessions and never reuses a session during forced login', async () => {
+    const previousSessionDir = process.env.IPA_SESSION_DIR;
+    const sessionDir = mkdtempSync(join(tmpdir(), 'pastel-session-migration-'));
+    const email = 'migration@example.com';
+    const digest = createHash('sha256').update(email).digest('hex');
+    const sessionFile = join(sessionDir, `${digest}.json`);
+    const session = (flowVersion) => ({
+        appleAccount: email,
+        flowVersion,
+        savedAt: Date.now(),
+        user: {
+            authHeaders: {'X-Token': 'secret-token', 'X-Dsid': '12345'},
+            cookieText: 'legacy-cookie',
+            pod: '6',
+        },
+    });
+
+    try {
+        process.env.IPA_SESSION_DIR = sessionDir;
+        const app = new Ipa({APPLE_ID: email, PASSWORD: 'password', CODE: ''});
+
+        for (const legacyFlow of ['gsa-srp-v10', 'gsa-srp-v11', 'appstore-direct-v1']) {
+            writeFileSync(sessionFile, JSON.stringify(session(legacyFlow)));
+            assert.equal(await app.loadReusableSessionEntry(), null, legacyFlow);
+            assert.equal(existsSync(sessionFile), false, legacyFlow);
+        }
+
+        writeFileSync(sessionFile, '{not-json');
+        assert.equal(await app.loadReusableSessionEntry(), null);
+        assert.equal(existsSync(sessionFile), false);
+
+        writeFileSync(sessionFile, JSON.stringify(session(SESSION_FLOW_VERSION)));
+        assert.equal((await app.loadReusableSessionEntry())?.flowVersion, SESSION_FLOW_VERSION);
+        assert.equal(existsSync(sessionFile), true);
+
+        assert.equal(await app.loadReusableSessionEntry({force: true}), null);
+        assert.equal(existsSync(sessionFile), false);
+    } finally {
+        if (previousSessionDir === undefined) delete process.env.IPA_SESSION_DIR;
+        else process.env.IPA_SESSION_DIR = previousSessionDir;
+        rmSync(sessionDir, {recursive: true, force: true});
+    }
 });
