@@ -1,6 +1,6 @@
 ## 2026 年 8 月 28 日更新通知
 
-Pastel 已尝试适配 Apple 最新的账户登录调整，登录逻辑参考 [ipatool-sapfix](https://github.com/maksimryabkin/ipatool-sapfix)。详情请参阅最新 Release。
+Pastel 已尝试适配 Apple 最新的账户登录调整，登录逻辑参考 [ipatool-sapfix](https://github.com/maksimryabkin/ipatool-sapfix)。详情请参阅最新 Release。此版本为强制更新版本，请务必下载最新版。
 
 # Pastel (迄今空前强大的一款 IPA 下载工具)。
 一款用于安装 IPA 历史版本的工具，适用于获取旧版应用并自动捕获数据包。下载后，可直接通过 AirDrop 传输至 iPhone、iPad 上并安装并使用。
