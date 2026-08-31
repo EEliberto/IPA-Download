@@ -10,8 +10,11 @@ import {Ipa, SESSION_FLOW_VERSION} from '../src/ipa.js';
 import {
     buildLoginBody,
     buildSignedAuthenticationHeaders,
+    isRetryableAuthenticationStatus,
     parseLoginResponse,
-    shouldRetryWithLegacyAuthenticate,
+    proxyBypassListMatches,
+    sendAuthenticationRequest,
+    validateAuthenticationEndpoint,
 } from '../src/gsa.js';
 
 test('recognizes StoreServices HTTP authentication failures', () => {
@@ -40,14 +43,72 @@ test('active Store login path does not invoke GSA or Anisette', () => {
     assert.doesNotMatch(mainSource, /request-2fa|IPA_NATIVE_ANISETTE/);
 });
 
-test('falls back from native authentication statuses used by ipatool', () => {
-    for (const status of [204, 403, 404, 503]) {
-        assert.equal(shouldRetryWithLegacyAuthenticate('https://auth.itunes.apple.com/auth/v1/native/fast/', status), true, String(status));
+test('retries only transient authentication responses used by upstream ipatool', () => {
+    for (const status of [204, 404, 500, 503, 599]) {
+        assert.equal(isRetryableAuthenticationStatus(status), true, String(status));
     }
-    for (const status of [0, 200, 302, 401, 429, 500]) {
-        assert.equal(shouldRetryWithLegacyAuthenticate('https://auth.itunes.apple.com/auth/v1/native/fast/', status), false, String(status));
+    for (const status of [0, 200, 302, 400, 401, 403, 429, 600]) {
+        assert.equal(isRetryableAuthenticationStatus(status), false, String(status));
     }
-    assert.equal(shouldRetryWithLegacyAuthenticate('https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate', 403), false);
+});
+
+test('bounds transient authentication retries and preserves the request body', () => {
+    const calls = [];
+    const sleeps = [];
+    const body = Buffer.from('signed plist');
+    const responses = [{status: 204}, {status: 503}, {status: 200, body: Buffer.from('ok')}];
+    const result = sendAuthenticationRequest(
+        'https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate',
+        body,
+        '/tmp/cookies',
+        (url, sentBody, jar) => {
+            calls.push({url, sentBody, jar});
+            return responses[calls.length - 1];
+        },
+        (milliseconds) => sleeps.push(milliseconds),
+    );
+
+    assert.equal(result.status, 200);
+    assert.equal(calls.length, 3);
+    assert.ok(calls.every((call) => call.sentBody === body));
+    assert.deepEqual(sleeps, [250, 500]);
+});
+
+test('does not retry HTTP 403 authentication rejection', () => {
+    let calls = 0;
+    const result = sendAuthenticationRequest(
+        'https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate',
+        Buffer.from('plist'),
+        null,
+        () => { calls += 1; return {status: 403, headers: '', body: Buffer.alloc(0)}; },
+        () => assert.fail('HTTP 403 must not sleep or retry'),
+    );
+
+    assert.equal(calls, 1);
+    assert.equal(result.status, 403);
+});
+
+test('accepts only Apple MZFinance authentication endpoints and pod redirects', () => {
+    const base = 'https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate';
+    const pod = 'https://p42-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate';
+    assert.equal(validateAuthenticationEndpoint(base), base);
+    assert.equal(validateAuthenticationEndpoint(pod), pod);
+    for (const endpoint of [
+        'http://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate',
+        'https://buy.itunes.apple.com/other',
+        'https://buy.itunes.apple.com.example.com/WebObjects/MZFinance.woa/wa/authenticate',
+        'https://example.com/WebObjects/MZFinance.woa/wa/authenticate',
+    ]) {
+        assert.throws(() => validateAuthenticationEndpoint(endpoint), /认证地址/);
+    }
+});
+
+test('honors standard proxy bypass host patterns', () => {
+    const url = 'https://p42-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate';
+    assert.equal(proxyBypassListMatches(url, 'localhost,.itunes.apple.com'), true);
+    assert.equal(proxyBypassListMatches(url, '*.apple.com'), true);
+    assert.equal(proxyBypassListMatches(url, 'localhost,example.com'), false);
+    assert.equal(proxyBypassListMatches(url, '*'), true);
 });
 
 test('signs the exact Store authentication plist bytes for Apple', () => {
@@ -94,6 +155,43 @@ test('does not misclassify Apple Configurator bad-login response as definite 2FA
 
     assert.equal(result.error?.code, 'AUTH_OR_2FA');
     assert.notEqual(result.error?.code, 'NEEDS_2FA');
+});
+
+test('reports a rejected password and verification-code combination after 2FA input', () => {
+    const body = Buffer.from(plist.build({
+        failureType: '',
+        customerMessage: 'MZFinance.BadLogin.Configurator_message',
+        'm-allowed': false,
+    }));
+    const result = parseLoginResponse({status: 200, headers: '', body}, 2, '123456');
+
+    assert.equal(result.error?.code, 'AUTH_INPUT_REJECTED');
+    assert.notEqual(result.error?.code, 'AUTH_OR_2FA');
+});
+
+test('rejects authentication redirects outside Apple before reposting credentials', () => {
+    const result = parseLoginResponse({
+        status: 302,
+        headers: 'Location: https://example.com/steal\r\n',
+        body: Buffer.alloc(0),
+    }, 1, '');
+
+    assert.equal(result.retry, false);
+    assert.match(result.error?.message || '', /认证地址/);
+});
+
+test('reports network, SAP rejection, and disabled-account failures precisely', () => {
+    const network = parseLoginResponse({status: 0, headers: '', body: Buffer.alloc(0)}, 1, '');
+    const forbidden = parseLoginResponse({status: 403, headers: '', body: Buffer.alloc(0)}, 1, '');
+    const disabled = parseLoginResponse({
+        status: 200,
+        headers: '',
+        body: Buffer.from(plist.build({failureType: '', customerMessage: 'Your account is disabled.'})),
+    }, 1, '');
+
+    assert.match(network.error?.message || '', /网络请求失败/);
+    assert.match(forbidden.error?.message || '', /SAP.*403/);
+    assert.match(disabled.error?.message || '', /账户已被停用/);
 });
 
 test('invalidates legacy sessions and never reuses a session during forced login', async () => {

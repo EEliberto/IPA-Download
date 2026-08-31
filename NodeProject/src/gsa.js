@@ -1,12 +1,14 @@
-// Apple StoreServices 登录：直接使用原生认证端点，通过 SAP 签名（X-Apple-ActionSignature）绕过 HTTP 403。
-// 修复方案精确对齐 ipatool-sapfix（pkg/appstore/appstore_login.go）。
+// Apple StoreServices 登录：使用 Apple bag 下发的 MZFinance 认证端点，并通过 SAP
+// 签名（X-Apple-ActionSignature）完成认证。
+// 登录协议与安全检查对齐 majd/ipatool 2026-08-29 的上游实现。
 //
 // 关键对齐点：
 //   1. Content-Type: application/x-www-form-urlencoded，但 body 是 plist XML（与 ipatool-sapfix 一致）
 //   2. SAP 签名作用于 plist body，写入 X-Apple-ActionSignature header
 //   3. 302 redirect：用 attempt=1 的原始 body 重发到 Location URL（不递增 attempt）
-//   4. fallback：只有在使用 native 端点且返回 204/403/404/503 时，递归用 legacy 端点重试
-//   5. attempt 递增：仅在 attempt==1 且 failureType==-5000（FailureTypeInvalidCredentials）时重试
+//   4. 只信任 bag 下发的 buy.itunes.apple.com 认证端点，并校验 302 重定向
+//   5. 对 204/404/5xx 临时响应有限重试；403 不再切换到其他认证端点
+//   6. attempt 递增：仅在 attempt==1 且 failureType==-5000 时重试
 //
 // HTTP 走系统 curl（避免 Node 自带 CA 在 TLS 解密代理下失败）。
 import crypto from 'crypto';
@@ -25,6 +27,12 @@ function ambiguousAuthError() {
     return e;
 }
 
+function rejectedAuthInputError() {
+    const e = new Error(t('auth_input_rejected'));
+    e.code = 'AUTH_INPUT_REJECTED';
+    return e;
+}
+
 // ---- 常量 ----
 const CURL = '/usr/bin/curl';
 const SCUTIL = '/usr/sbin/scutil';
@@ -38,11 +46,10 @@ const CUSTOMER_MESSAGE_ACCOUNT_DISABLED = 'Your account is disabled.';
 // 对齐 ipatool-sapfix/pkg/http/constants.go
 const HEADER_SAP_SIGNATURE = 'X-Apple-ActionSignature';
 
-// 对齐 ipatool-sapfix/pkg/appstore/appstore_login.go legacyAuthenticateEndpoint
-const LEGACY_AUTH_URL = 'https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate';
-
-// 对齐 ipatool-sapfix/pkg/appstore/appstore_login.go
-const DEFAULT_NATIVE_AUTH_BASE = 'https://auth.itunes.apple.com/auth/v1/native/fast/';
+const AUTH_PATH = '/WebObjects/MZFinance.woa/wa/authenticate';
+const AUTH_HOST = 'buy.itunes.apple.com';
+const MAX_AUTH_REQUEST_ATTEMPTS = 3;
+const AUTH_RETRY_DELAY_MS = 250;
 
 // SAP signer 路径
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -59,15 +66,82 @@ export function cleanup() {
 }
 
 // ---- 系统代理 ----
-function systemProxy() {
+function parseSystemProxySettings() {
     try {
         const out = execFileSync(SCUTIL, ['--proxy'], {timeout: 5000}).toString();
-        const httpsOn = /HTTPSEnable\s*:\s*1/.test(out);
-        const host = (out.match(/HTTPSProxy\s*:\s*(\S+)/) || [])[1];
-        const port = (out.match(/HTTPSPort\s*:\s*(\d+)/) || [])[1];
-        if (httpsOn && host && port) return `http://${host}:${port}`;
+        const value = (key) => (out.match(new RegExp(`^\\s*${key}\\s*:\\s*(.+)$`, 'm')) || [])[1]?.trim() || '';
+        const exceptionBlock = (out.match(/^\s*ExceptionsList\s*:\s*<array>\s*\{([\s\S]*?)^\s*\}/m) || [])[1] || '';
+        const exceptions = [...exceptionBlock.matchAll(/^\s*\d+\s*:\s*(.+)$/gm)].map((match) => match[1].trim());
+        return {
+            httpEnabled: value('HTTPEnable') === '1',
+            httpHost: value('HTTPProxy'),
+            httpPort: value('HTTPPort'),
+            httpsEnabled: value('HTTPSEnable') === '1',
+            httpsHost: value('HTTPSProxy'),
+            httpsPort: value('HTTPSPort'),
+            socksEnabled: value('SOCKSEnable') === '1',
+            socksHost: value('SOCKSProxy'),
+            socksPort: value('SOCKSPort'),
+            excludeSimpleHostnames: value('ExcludeSimpleHostnames') === '1',
+            exceptions,
+        };
     } catch { /* ignore */ }
-    return process.env.HTTPS_PROXY || process.env.https_proxy || '';
+    return {};
+}
+
+function proxyFromEnvironment(url) {
+    const protocol = new URL(url).protocol;
+    if (protocol === 'https:') {
+        return process.env.HTTPS_PROXY || process.env.https_proxy
+            || process.env.ALL_PROXY || process.env.all_proxy || '';
+    }
+    return process.env.HTTP_PROXY || process.env.http_proxy
+        || process.env.ALL_PROXY || process.env.all_proxy || '';
+}
+
+export function proxyBypassListMatches(url, bypassList) {
+    const host = new URL(url).hostname.toLowerCase();
+    return String(bypassList || '').split(',').some((rawEntry) => {
+        let entry = rawEntry.trim().toLowerCase();
+        if (!entry) return false;
+        if (entry === '*') return true;
+        if (entry.includes('://')) {
+            try { entry = new URL(entry).hostname.toLowerCase(); }
+            catch { return false; }
+        } else if ((entry.match(/:/g) || []).length === 1) {
+            entry = entry.split(':')[0];
+        }
+        entry = entry.replace(/^\*\./, '').replace(/^\./, '');
+        return host === entry || host.endsWith(`.${entry}`);
+    });
+}
+
+// curl 不会自动读取 macOS“网络”中的代理设置，因此显式转成 --proxy。
+// HTTPS 可经 HTTPS/HTTP CONNECT 代理，也支持常见代理客户端提供的 SOCKS5 端口。
+export function systemProxyForURL(url) {
+    const host = new URL(url).hostname;
+    const noProxy = process.env.NO_PROXY || process.env.no_proxy || '';
+    if (proxyBypassListMatches(url, noProxy)) return '';
+
+    const envProxy = proxyFromEnvironment(url);
+    if (envProxy) return envProxy;
+
+    const settings = parseSystemProxySettings();
+    if ((settings.excludeSimpleHostnames && !host.includes('.'))
+        || proxyBypassListMatches(url, (settings.exceptions || []).join(','))) {
+        return '';
+    }
+    const protocol = new URL(url).protocol;
+    if (protocol === 'https:' && settings.httpsEnabled && settings.httpsHost && settings.httpsPort) {
+        return `http://${settings.httpsHost}:${settings.httpsPort}`;
+    }
+    if (settings.httpEnabled && settings.httpHost && settings.httpPort) {
+        return `http://${settings.httpHost}:${settings.httpPort}`;
+    }
+    if (settings.socksEnabled && settings.socksHost && settings.socksPort) {
+        return `socks5h://${settings.socksHost}:${settings.socksPort}`;
+    }
+    return '';
 }
 
 export const STORE_USER_AGENT = STORE_UA;
@@ -78,11 +152,11 @@ export function curlRequest(method, url, {headers = {}, body = null, follow = fa
     const dir = tmpDir();
     const outFile = path.join(dir, `out-${crypto.randomBytes(4).toString('hex')}.bin`);
     const hdrFile = path.join(dir, `hdr-${crypto.randomBytes(4).toString('hex')}.txt`);
-    const args = ['-s', '-m', String(timeout), '-X', method, url,
+    const args = ['-sS', '-m', String(timeout), '--connect-timeout', String(Math.min(timeout, 10)), '-X', method, url,
         '-o', outFile, '-D', hdrFile, '-w', '%{http_code}'];
     if (jar) args.push('-b', jar, '-c', jar);
     if (follow) args.push('-L', '--post302');
-    const proxy = systemProxy();
+    const proxy = systemProxyForURL(url);
     if (proxy) args.push('--proxy', proxy);
     for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
     if (body !== null) {
@@ -91,11 +165,28 @@ export function curlRequest(method, url, {headers = {}, body = null, follow = fa
         args.push('--data-binary', `@${bodyFile}`);
     }
     let status = '000';
-    try { status = execFileSync(CURL, args, {maxBuffer: 64 * 1024 * 1024, timeout: (timeout + 5) * 1000}).toString().trim(); }
-    catch { status = '000'; }
+    let errorDetail = '';
+    const execute = (requestArgs) => {
+        try {
+            errorDetail = '';
+            return execFileSync(CURL, requestArgs, {
+                maxBuffer: 64 * 1024 * 1024,
+                timeout: (timeout + 5) * 1000,
+            }).toString().trim();
+        } catch (error) {
+            errorDetail = Buffer.isBuffer(error?.stderr)
+                ? error.stderr.toString('utf8').trim()
+                : String(error?.message || error || '').trim();
+            return '000';
+        }
+    };
+    status = execute(args);
+    // 部分大陆网络存在不可用 IPv6 路由。只有直连完全失败时再强制 IPv4，
+    // 不影响正常 IPv6，也不改变用户显式配置的代理线路。
+    if (status === '000' && !proxy) status = execute([...args, '--ipv4']);
     const respBody = existsSync(outFile) ? readFileSync(outFile) : Buffer.alloc(0);
     const respHdrs = existsSync(hdrFile) ? readFileSync(hdrFile, 'utf8') : '';
-    return {status: Number(status), headers: respHdrs, body: respBody};
+    return {status: Number(status), headers: respHdrs, body: respBody, error: errorDetail};
 }
 
 function headerValue(rawHeaders, name) {
@@ -143,17 +234,7 @@ export function buildSignedAuthenticationHeaders(baseHeaders, body, signer = sig
     return {...baseHeaders, [HEADER_SAP_SIGNATURE]: signature.toString('base64')};
 }
 
-// ---- URL 规范化（对齐 authenticateURL()） ----
-// Apple native 端点路径末尾必须有斜杠，否则会被 redirect/drop。
-function authenticateURL(endpoint) {
-    if (!endpoint) return endpoint;
-    if (endpoint.includes('/native/') && !endpoint.endsWith('/')) {
-        return endpoint + '/';
-    }
-    return endpoint;
-}
-
-// ---- bag.xml 获取 native auth 端点（对齐 Bag()） ----
+// ---- bag.xml 获取并校验认证端点（对齐上游 Bag()） ----
 function extractPlistText(text) {
     const start = text.indexOf('<plist');
     const end = text.indexOf('</plist>');
@@ -161,23 +242,35 @@ function extractPlistText(text) {
     return text;
 }
 
-function fetchNativeAuthEndpoint(guid) {
-    try {
-        const url = `https://init.itunes.apple.com/bag.xml?guid=${encodeURIComponent(guid)}`;
-        const {status, body} = curlRequest('GET', url, {
-            headers: {'User-Agent': STORE_UA, Accept: 'application/xml'},
-            follow: true,
-            timeout: 20,
-        });
-        if (status < 200 || status >= 300) return DEFAULT_NATIVE_AUTH_BASE;
-        const parsed = plist.parse(extractPlistText(body.toString('utf8')));
-        const authURL = parsed?.urlBag?.authenticateAccount || parsed?.authenticateAccount;
-        if (!authURL) return DEFAULT_NATIVE_AUTH_BASE;
-        // 规范化尾部斜杠
-        return authenticateURL(authURL);
-    } catch {
-        return DEFAULT_NATIVE_AUTH_BASE;
+export function validateAuthenticationEndpoint(endpoint) {
+    let parsed;
+    try { parsed = new URL(endpoint); }
+    catch { throw new Error(`Apple 返回了无效的认证地址：${endpoint || '(empty)'}`); }
+
+    const host = parsed.hostname.toLowerCase();
+    const trustedHost = host === AUTH_HOST || host.endsWith(`-${AUTH_HOST}`);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !trustedHost || parsed.pathname !== AUTH_PATH) {
+        throw new Error(`Apple 返回了不受信任的认证地址：${endpoint}`);
     }
+    return parsed.toString();
+}
+
+function fetchAuthenticationEndpoint(guid) {
+    const url = `https://init.itunes.apple.com/bag.xml?guid=${encodeURIComponent(guid)}`;
+    const {status, body} = curlRequest('GET', url, {
+        headers: {'User-Agent': STORE_UA, Accept: 'application/xml'},
+        follow: true,
+        timeout: 20,
+    });
+    if (status === 0) throw new Error(t('net_failed_suffix'));
+    if (status < 200 || status >= 300) throw new Error(`Apple bag 请求失败（HTTP ${status}）`);
+
+    let parsed;
+    try { parsed = plist.parse(extractPlistText(body.toString('utf8'))); }
+    catch (error) { throw new Error(`Apple bag 返回格式异常：${error.message}`); }
+    const authURL = parsed?.urlBag?.authenticateAccount || parsed?.authenticateAccount;
+    if (!authURL) throw new Error('Apple bag 缺少认证地址');
+    return validateAuthenticationEndpoint(authURL);
 }
 
 // ---- 构建登录请求参数（对齐 loginRequest().Payload.Content） ----
@@ -207,11 +300,26 @@ function postWithSAP(url, body, jar) {
     return curlRequest('POST', url, {headers, body, follow: false, timeout: 30, jar});
 }
 
-// ---- 判断是否应 fallback 到 legacy 端点（对齐 shouldRetryWithLegacyAuthenticate()） ----
-// 只有在使用 native endpoint（含 /native/）时才 fallback。
-export function shouldRetryWithLegacyAuthenticate(endpoint, status) {
-    if (!endpoint.includes('/native/')) return false;
-    return [204, 403, 404, 503].includes(Number(status));
+export function isRetryableAuthenticationStatus(status) {
+    const value = Number(status);
+    return value === 204 || value === 404 || (value >= 500 && value <= 599);
+}
+
+function sleepSync(milliseconds) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+// 对齐上游 sendAuthenticationRequest：临时 HTTP 响应最多重发三次，403 不重试。
+export function sendAuthenticationRequest(url, body, jar, send = postWithSAP, sleep = sleepSync) {
+    const statuses = [];
+    let res;
+    for (let attempt = 1; attempt <= MAX_AUTH_REQUEST_ATTEMPTS; attempt++) {
+        res = send(url, body, jar);
+        if (!isRetryableAuthenticationStatus(res.status)) return res;
+        statuses.push(res.status);
+        if (attempt < MAX_AUTH_REQUEST_ATTEMPTS) sleep(attempt * AUTH_RETRY_DELAY_MS);
+    }
+    throw new Error(`Apple 认证请求重试 ${MAX_AUTH_REQUEST_ATTEMPTS} 次后仍失败（HTTP ${statuses.join(', ')}）`);
 }
 
 // ---- 核心登录循环（精确对齐 login() for 循环）----
@@ -235,15 +343,10 @@ function storePasswordAuthenticate(email, password, code, guid, jar, endpoint) {
         const requestAttempt = redirect !== '' ? 1 : attempt;
         const body = buildLoginBody(email, password, code, guid, requestAttempt);
 
-        const targetURL = redirect !== '' ? redirect : authenticateURL(endpoint);
+        const targetURL = redirect !== '' ? redirect : endpoint;
         redirect = ''; // 清空，对齐：request.URL, _ = util.IfEmpty(redirect, request.URL), ""
 
-        res = postWithSAP(targetURL, body, jar);
-
-        // shouldRetryWithLegacyAuthenticate：native 端点 + 204/403/404/503 → 递归用 legacy 重试
-        if (shouldRetryWithLegacyAuthenticate(endpoint, res.status)) {
-            return storePasswordAuthenticate(email, password, code, guid, jar, LEGACY_AUTH_URL);
-        }
+        res = sendAuthenticationRequest(targetURL, body, jar);
 
         // parseLoginResponse 逻辑
         const parsed = parseLoginResponse(res, attempt, code);
@@ -269,11 +372,16 @@ export function parseLoginResponse(res, attempt, authCode) {
     const status = res.status;
 
     // 302 redirect：返回 Location，重发
-    if (status === 302 || status === 301) {
+    if (status === 302) {
         const location = headerValue(res.headers, 'location');
         if (location) {
-            return {retry: true, redirect: location, error: null, data: null};
+            try {
+                return {retry: true, redirect: validateAuthenticationEndpoint(location), error: null, data: null};
+            } catch (error) {
+                return {retry: false, redirect: '', error, data: null};
+            }
         }
+        return {retry: false, redirect: '', error: new Error('Apple 认证重定向缺少地址'), data: null};
     }
 
     // 非重定向但也不是成功响应，尝试解析 plist
@@ -283,6 +391,15 @@ export function parseLoginResponse(res, attempt, authCode) {
     }
 
     if (!parsed) {
+        if (status === 0) {
+            return {retry: false, redirect: '', error: new Error(t('net_failed_suffix')), data: null};
+        }
+        if (status === 403) {
+            return {retry: false, redirect: '', error: new Error(t('sap_auth_rejected')), data: null};
+        }
+        if (status !== 200) {
+            return {retry: false, redirect: '', error: new Error(t('auth_http_failed', {status})), data: null};
+        }
         // 无法解析 plist，视为服务端错误
         return {retry: false, redirect: '', error: new Error(t('store_token_failed')), data: null};
     }
@@ -297,13 +414,18 @@ export function parseLoginResponse(res, attempt, authCode) {
 
     // Apple 对错误密码和 2FA 挑战都会返回同一个 Configurator_message，
     // 不能在这里武断地将它归类为 2FA。
-    if (failureType === '' && !authCode && customerMessage === CUSTOMER_MESSAGE_BAD_LOGIN) {
-        return {retry: false, redirect: '', error: ambiguousAuthError(), data: null};
+    if (failureType === '' && customerMessage === CUSTOMER_MESSAGE_BAD_LOGIN) {
+        return {
+            retry: false,
+            redirect: '',
+            error: authCode ? rejectedAuthInputError() : ambiguousAuthError(),
+            data: null,
+        };
     }
 
     // failureType=="" && customerMessage=="Your account is disabled."
     if (failureType === '' && customerMessage === CUSTOMER_MESSAGE_ACCOUNT_DISABLED) {
-        return {retry: false, redirect: '', error: new Error(t('wrong_password')), data: null};
+        return {retry: false, redirect: '', error: new Error(t('account_disabled')), data: null};
     }
 
     // failureType != "" → 错误
@@ -335,11 +457,9 @@ export async function storeLogin(email, password, code, guid, cookieText = '', p
     const jar = path.join(tmpDir(), `store-cookies-${crypto.createHash('sha256').update(String(email || '')).digest('hex').slice(0, 12)}.txt`);
     if (cookieText) writeFileSync(jar, cookieText);
 
-    // 从 bag.xml 获取 native 端点（对齐 Bag() 的调用方式）
-    const nativeEndpoint = fetchNativeAuthEndpoint(guid);
-
-    // 执行登录（storePasswordAuthenticate 内部会按需 fallback 到 legacy）
-    const {res, parsed} = storePasswordAuthenticate(email, password, code, guid, jar, nativeEndpoint);
+    // 上游已删除 native/fast 与 legacy fallback，只使用 bag 下发并校验过的认证地址。
+    const authEndpoint = fetchAuthenticationEndpoint(guid);
+    const {res, parsed} = storePasswordAuthenticate(email, password, code, guid, jar, authEndpoint);
 
     // 构建用户信息（对齐 login() 返回 Account）
     const storeFront = headerValue(res.headers, 'x-set-apple-store-front');

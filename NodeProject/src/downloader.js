@@ -1,9 +1,9 @@
 import {promises as fsPromises, createWriteStream, createReadStream} from 'fs';
 import path from 'path';
-import {execFileSync} from 'child_process';
 import axios from 'axios';
 import PQueue from 'p-queue';
 import {t} from './i18n.js';
+import {systemProxyForURL} from './gsa.js';
 
 const CHUNK = 5 * 1024 * 1024;
 const CONC = 10;
@@ -11,21 +11,24 @@ const RETRIES = 3;
 const RETRY_DELAY = 1000;
 const TIMEOUT = 60000;
 
-// 读取 macOS 系统代理（与认证层一致），下载也经代理，避免在开启 TLS 解密的网络环境下失败。
-function systemProxy() {
+// 与登录层共用代理选择。axios 不原生支持 SOCKS，因此 SOCKS 仅用于 curl 驱动的
+// Apple 登录/商店请求；IPA 文件下载仍支持 HTTP(S) 代理。
+function systemProxy(url) {
+    const value = systemProxyForURL(url);
+    if (!value) return false;
     try {
-        const out = execFileSync('/usr/sbin/scutil', ['--proxy'], {timeout: 5000}).toString();
-        const httpsOn = /HTTPSEnable\s*:\s*1/.test(out);
-        const host = (out.match(/HTTPSProxy\s*:\s*(\S+)/) || [])[1];
-        const port = (out.match(/HTTPSPort\s*:\s*(\d+)/) || [])[1];
-        if (httpsOn && host && port) return {host, port: Number(port), protocol: 'http'};
-    } catch { /* ignore */ }
-    const env = process.env.HTTPS_PROXY || process.env.https_proxy;
-    if (env) {
-        try { const u = new URL(env); return {host: u.hostname, port: Number(u.port) || 80, protocol: 'http'}; }
-        catch { /* ignore */ }
-    }
-    return false;
+        const parsed = new URL(value);
+        if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+        const proxy = {
+            host: parsed.hostname,
+            port: Number(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80),
+            protocol: parsed.protocol.slice(0, -1),
+        };
+        if (parsed.username || parsed.password) {
+            proxy.auth = {username: decodeURIComponent(parsed.username), password: decodeURIComponent(parsed.password)};
+        }
+        return proxy;
+    } catch { return false; }
 }
 
 function sanitize(prefix, rawError, meta = {}) { const err = rawError instanceof Error ? rawError : new Error(String(rawError));
@@ -148,7 +151,7 @@ async function download(url, out, dir, auth = {}, opts = {}) { const chunk = opt
     const delay = opts.retryDelayMs || RETRY_DELAY;
     const timeout = opts.timeout || TIMEOUT;
     await fsPromises.mkdir(dir, {recursive: true});
-    const client = axios.create({timeout, proxy: systemProxy()});
+    const client = axios.create({timeout, proxy: systemProxy(url)});
     let size;
     try {
         const h = await client.head(url, {headers: {...auth}, timeout}).catch(async () => {
