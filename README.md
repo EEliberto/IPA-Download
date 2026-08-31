@@ -1,56 +1,127 @@
-## 2026 年 8 月 31 日更新通知
+<div align="center">
+  <img src="docs/assets/pastel-app-icon.png" width="148" alt="Pastel App Icon">
+  <h1>Pastel</h1>
+  <p><strong>为 macOS 打造的原生 IPA 历史版本下载工具</strong></p>
+  <p>搜索 App、查找历史版本，并将 IPA 轻松传输到 iPhone 或 iPad。</p>
 
-Pastel 已尝试适配 Apple 最新的账户登录调整，当前登录协议与安全检查参考 [ipatool](https://github.com/majd/ipatool)，早期适配参考 [ipatool-sapfix](https://github.com/maksimryabkin/ipatool-sapfix)。详情请参阅最新 Release。此版本为强制更新版本，请务必下载最新版。且由于新的认证方式强制要求 Mac 为真实 Mac，虚拟机环境仍然无法使用/登陆/下载 IPA。
+  <p>
+    <img src="https://img.shields.io/badge/version-20260831-0A84FF?style=flat-square" alt="Version 20260831">
+    <img src="https://img.shields.io/badge/macOS-26%2B-111111?style=flat-square&logo=apple" alt="macOS 26 or later">
+    <img src="https://img.shields.io/badge/Apple%20Silicon-required-111111?style=flat-square&logo=apple" alt="Apple Silicon required">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-6B7280?style=flat-square" alt="Apache 2.0 License">
+  </p>
 
-# Pastel (迄今空前强大的一款 IPA 下载工具)。
-一款用于安装 IPA 历史版本的工具，适用于获取旧版应用并自动捕获数据包。下载后，可直接通过 AirDrop 传输至 iPhone、iPad 上并安装并使用。
+  <p>
+    <a href="https://github.com/EEliberto/IPA-Download/releases/latest"><strong>下载最新版</strong></a>
+    ·
+    <a href="https://github.com/EEliberto/IPA-Download/issues">提交问题</a>
+    ·
+    <a href="#源码构建">源码构建</a>
+  </p>
+</div>
 
-目前只支持 macOS 26+ 且配备 Apple 芯片的 Mac。由于作者暂无 Windows PC 设备，故暂时没有 Windows 版本开发计划。
+---
 
-使用 SwiftUI 编译，完美适配 macOS 26 的 Liquid Glass 效果。
+> [!IMPORTANT]
+> **2026 年 8 月 31 日更新通知**
+>
+> Pastel 已尝试适配 Apple 最新的账户登录调整，当前登录协议与安全检查参考 [majd/ipatool](https://github.com/majd/ipatool)。20260831 是强制更新版本，请务必下载最新版。新的认证方式要求在真实的 Apple Silicon Mac 上运行；虚拟机环境仍然无法登录或下载 IPA。
 
-# 主页面。
-你可以轻松使用 Pastel 在对应地区的 App Store 内查看并搜索 App。更强大的是，它能直接根据你选择的 Apple 账户地区自动选择商店。在切换地区时，还会自动切换到你已登陆并对应地区的 Apple 账户。甚至支持直接下载一款此 Apple 账户从未下载过的 App。
+## Pastel 能做什么
 
-<img width="1214" height="881" alt="image" src="https://github.com/user-attachments/assets/690166e2-78ad-42f8-9db2-40b79e435b71" />
-<img width="956" height="656" alt="image" src="https://github.com/user-attachments/assets/f3685fee-445f-41bc-8fea-2d1e602dec92" />
+| 能力 | 说明 |
+| --- | --- |
+| App Store 搜索 | 浏览并搜索不同地区 App Store 中的 App |
+| 历史版本查询 | 聚合多个版本来源，也支持手动输入 App ID 与版本 ID |
+| Apple 账户匹配 | 根据账户所属地区自动选择商店，并在切换地区时匹配对应账户 |
+| IPA 下载与管理 | 下载从 Apple 获取的 IPA，在 App 内查看文件及 App 图标 |
+| 快速传输 | 通过系统分享菜单或 AirDrop 将 IPA 发送到 iPhone、iPad |
+| 完整代理支持 | 遵循 macOS 的 HTTP、HTTPS、SOCKS5、`ALL_PROXY`、`NO_PROXY` 及系统排除项规则 |
 
-# 现支持简体中文、繁体中文、日语、韩语和泰语作为主要语言。
+## 主页面
 
-<img width="1032" height="732" alt="image" src="https://github.com/user-attachments/assets/e6ef07a0-8834-457d-87f7-0bea14b45633" />
+在对应地区的 App Store 中搜索 App。Pastel 会根据所选 Apple 账户的地区自动选择商店，并在切换地区时匹配已登录的对应账户。
 
-# 空前强大的下载页面。
-你可以直接在下载页面找到已下载的 IPA 文件，并直接预览它的 App Icon，这针对一些特定节假日，比如 618 期间打广告的 App 格外实用。点击分享按钮，便可直接 AirDrop 到你的 iPhone 或 iPad 进行安装。
+<p align="center">
+  <img width="880" alt="Pastel 主页面" src="https://github.com/user-attachments/assets/690166e2-78ad-42f8-9db2-40b79e435b71">
+</p>
 
-<img width="1138" height="805" alt="image" src="https://github.com/user-attachments/assets/1de14592-ebc6-4ee7-9b0c-17e7e0073171" />
+<p align="center">
+  <img width="760" alt="Pastel App 详情页面" src="https://github.com/user-attachments/assets/f3685fee-445f-41bc-8fea-2d1e602dec92">
+</p>
 
-# 初次使用。
-初次使用，请前往“设置”>“Apple 账户”，添加你的 Apple 账户，一切数据都保存在 iCloud KeyChain，放心且安全。在登陆后完成双重认证，Pastel 会自动识别 Apple 账户的所属地区并完成登陆。解决了市面上已有 IPA 下载工具的很多问题，例如双重认证无法触发，经常丢失保存数据等 (使用了 GSA 技术来触发双重认证，更稳定且安全)。
+## 下载与管理
 
-<img width="556" height="301" alt="image" src="https://github.com/user-attachments/assets/c9efab09-2c9e-4593-908a-f01845b88465" />
+下载页面集中展示已经获取的 IPA 文件及对应 App 图标。选择分享按钮，即可通过 AirDrop 发送到 iPhone 或 iPad。
 
-# 众多来源可选。
-云集了 Timbrd、Agsy、Bilin 下载源的版本 ID 信息，方便你快速找到对应的版本 ID。
+<p align="center">
+  <img width="820" alt="Pastel 下载页面" src="https://github.com/user-attachments/assets/1de14592-ebc6-4ee7-9b0c-17e7e0073171">
+</p>
 
-如果你想要从 Apple 获取，也没问题，只需要点击 Apple，它就会从你的 Apple 账户获取一次此 App 的版本 ID 并显示 (如果未曾拥有此 App，则会自动完成获取，付费 App 除外)。
+## 版本来源
 
-如果你知道对应 App 的版本 ID，也可手动输入版本 ID 下载。
+Pastel 聚合 Timbrd、Agsy 与 Bilin 的版本 ID 信息，也可以直接从 Apple 账户获取 App 的版本记录。若账户从未拥有该免费 App，Pastel 会尝试先完成获取；付费 App 除外。
 
-<img width="460" height="90" alt="image" src="https://github.com/user-attachments/assets/4de67361-8727-4705-8718-f9be81bc7b01" />
+如果已经知道目标版本 ID，也可以直接手动输入并下载。
 
-# 鸣谢。
-本项目参考了来自 ipatools 的部份代码和原理 https://github.com/beer-psi/ipatool.ts
+<p align="center">
+  <img width="520" alt="Pastel 版本来源选择" src="https://github.com/user-attachments/assets/4de67361-8727-4705-8718-f9be81bc7b01">
+</p>
 
-登陆流程依赖 SideStore 的 GSA。Device (设备) GUID 逻辑参考 https://github.com/Lakr233/Asspp
+## 初次使用
 
-多语言翻译依赖 Claude
+1. 从 [GitHub Releases](https://github.com/EEliberto/IPA-Download/releases/latest) 下载最新 DMG，并将 Pastel 拖入“应用程序”。
+2. 打开 Pastel，前往“设置” → “Apple 账户”。
+3. 添加 Apple 账户并按提示完成双重认证。
+4. 登录成功后，Pastel 会识别账户所属地区并完成商店配置。
 
-# 源码构建。
-首次克隆后，请先安装 Node 依赖：
+账户登录信息保存在系统 iCloud 钥匙串中。Pastel 的认证流程依赖 macOS 自带的 StoreServices，因此必须使用真实的 Mac，虚拟机环境不受支持。
+
+<p align="center">
+  <img width="600" alt="Pastel Apple 账户设置" src="https://github.com/user-attachments/assets/c9efab09-2c9e-4593-908a-f01845b88465">
+</p>
+
+## 系统要求
+
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | macOS 26 或更高版本 |
+| 处理器 | Apple Silicon |
+| 运行环境 | 真实 Mac，不支持虚拟机 |
+| 网络 | 需要能够访问 Apple 服务；网络不稳定时建议使用代理 |
+
+Pastel 采用 SwiftUI 构建，并适配 macOS 26 的 Liquid Glass。当前提供简体中文、繁体中文、日语、韩语和泰语界面。
+
+<p align="center">
+  <img width="760" alt="Pastel 多语言界面" src="https://github.com/user-attachments/assets/e6ef07a0-8834-457d-87f7-0bea14b45633">
+</p>
+
+## 源码构建
+
+首次克隆后，先安装 Node.js 依赖：
 
 ```bash
 cd NodeProject
 npm install
+cd ..
 ```
 
-然后使用 Xcode 打开 `Pastel.xcodeproj` 构建运行。
+随后使用 Xcode 打开 `Pastel.xcodeproj` 并构建运行。
+
+## 鸣谢
+
+- Apple 登录协议与安全检查参考 [majd/ipatool](https://github.com/majd/ipatool)。
+- 部分代码与实现原理参考 [beer-psi/ipatool.ts](https://github.com/beer-psi/ipatool.ts)。
+- GSA 登录流程依赖 [SideStore](https://github.com/SideStore/SideStore)。
+- Device GUID 逻辑参考 [Lakr233/Asspp](https://github.com/Lakr233/Asspp)。
+- 多语言翻译由 Claude 协助完成。
+
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE) 开源许可证。
+
+---
+
+<div align="center">
+  <sub>如果 Pastel 对你有帮助，欢迎 Star 本项目；遇到问题请前往 <a href="https://github.com/EEliberto/IPA-Download/issues">GitHub Issues</a>。</sub>
+</div>
