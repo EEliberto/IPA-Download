@@ -3,25 +3,26 @@
     <channel>
         <title>Pastel</title>
         <item>
-            <title>20260831</title>
-            <pubDate>Mon, 31 Aug 2026 17:40:58 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel20260831</link>
-            <sparkle:version>20260831</sparkle:version>
-            <sparkle:shortVersionString>20260831</sparkle:shortVersionString>
+            <title>20260901</title>
+            <pubDate>Tue, 01 Sep 2026 21:13:45 +0800</pubDate>
+            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel20260901</link>
+            <sparkle:version>20260901</sparkle:version>
+            <sparkle:shortVersionString>20260901</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <sparkle:criticalUpdate/>
-            <description sparkle:format="markdown"><![CDATA[感谢你使用 Pastel！20260831 版本带来了如下更新：
+            <description sparkle:format="markdown"><![CDATA[感谢你使用 Pastel！20260901 版本带来了如下更新：
 
-1.修复了中国大陆用户登陆问题 (可能)，仍建议走代理确保稳定性。登陆错误请优先检查密码正确性。
-2.修复了其他 SAP 登陆问题。上游链接更换至 [https://github.com/majd/ipatool](https://github.com/majd/ipatool)。
-3.完善了 App 代理支持能力，尊重 macOS 的 HTTP、HTTPS、SOCKS5、ALL_PROXY、NO_PROXY 和系统排除项规则并在直连完全失败时自动尝试 IPv4。
+1.修复了部分 Mac 可能将设备 GUID 识别为 020000000000 的问题。设备 GUID 现改用 Asspp/ApplePackage 的 sysctl 接口方案读取，不再通过 ifconfig 获取。
+2.新增设备 GUID 安全校验，自动淘汰 020000000000、000000000000、FFFFFFFFFFFF 等无效占位值；无法取得可靠设备标识时会阻止 Apple 账户登录，避免异常标识参与认证。
+3.升级了设备会话版本并使旧会话自动失效。更新后 Apple 账户可能需要重新登录一次，以确保后续登录与下载请求使用正确且稳定的设备 GUID。
+4.完善了 Swift 与 Node 两层防护，避免无效或变化后的设备 GUID 与旧 StoreServices 会话混用。
 
-Pastel 正在为 macOS 27 Golden Gate 做好准备，预计会在 macOS 27 RC 版推出后发布适配 macOS 27 Golden Gate 的版本。
+感谢 GitHub Issue #42 的用户反馈。由于 Apple 账户风控规则并不公开，目前无法确认异常设备 GUID 与账户锁定之间存在直接因果关系，但 Pastel 已按高风险问题处理并加入保护。
 
 如果你有任何问题，请在 GitHub 中提交 Issue。谢谢！
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel20260831/Pastel-20260831.dmg" length="50789269" type="application/octet-stream" sparkle:edSignature="RvjMJ89v1ZqGvf7kF4v/qjttrBMh8j24nqEmNeCE9nuYQMl24uCk75e1Qdr3oQax7UmlLb1/+scr3IlvWIPoDA=="/>
+            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel20260901/Pastel-20260901.dmg" length="53775258" type="application/octet-stream" sparkle:edSignature="eNzCexIiENTJUfhGl1KQBVPRVfPit5esL+WI0atUScb5gIVsQLvwIuXvYgmGxD5TK/j+dIgdziMlEje0fmLRCQ=="/>
         </item>
         <item>
             <title>26.7.1</title>
