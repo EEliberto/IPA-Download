@@ -21,6 +21,7 @@ const MESSAGES = {
         sign_ok: '软件签名：[OK] 文件签名成功！',
 
         unknown_provider: '未知历史版本来源：{provider}',
+        device_guid_invalid: '无法获取可靠的设备 GUID。为保护 Apple 账户，Pastel 已阻止登录。请确认正在使用真实 Mac，并在更新系统后重试。',
 
         download_progress: '下载进度: {dMB}MB / {tMB}MB ({pct}%) - 速度: {speed} MB/s',
         dl_chunk_prefix: '下载分块：',
@@ -97,6 +98,7 @@ const MESSAGES = {
         sign_ok: '軟件簽署：[OK] 檔案簽署成功！',
 
         unknown_provider: '未知歷史版本來源：{provider}',
+        device_guid_invalid: '無法取得可靠的裝置 GUID。為保護 Apple 帳戶，Pastel 已阻止登入。請確認正在使用真正的 Mac，並在更新系統後重試。',
 
         download_progress: '下載進度: {dMB}MB / {tMB}MB ({pct}%) - 速度: {speed} MB/s',
         dl_chunk_prefix: '下載分塊：',
@@ -173,6 +175,7 @@ const MESSAGES = {
         sign_ok: '軟體簽署：[OK] 檔案簽署成功！',
 
         unknown_provider: '未知歷史版本來源：{provider}',
+        device_guid_invalid: '無法取得可靠的裝置 GUID。為保護 Apple 帳號，Pastel 已阻止登入。請確認正在使用真正的 Mac，並在更新系統後重試。',
 
         download_progress: '下載進度: {dMB}MB / {tMB}MB ({pct}%) - 速度: {speed} MB/s',
         dl_chunk_prefix: '下載分塊：',
@@ -249,6 +252,7 @@ const MESSAGES = {
         sign_ok: '署名：[OK] ファイルの署名に成功！',
 
         unknown_provider: '不明なバージョン提供元：{provider}',
+        device_guid_invalid: '信頼できるデバイス GUID を取得できません。Apple Account を保護するため、Pastel はサインインを停止しました。実機の Mac を使用していることを確認し、macOS を更新してから再試行してください。',
 
         download_progress: 'ダウンロード進捗: {dMB}MB / {tMB}MB ({pct}%) - 速度: {speed} MB/s',
         dl_chunk_prefix: 'チャンクダウンロード：',
@@ -325,6 +329,7 @@ const MESSAGES = {
         sign_ok: '서명: [OK] 파일 서명 성공!',
 
         unknown_provider: '알 수 없는 버전 제공처: {provider}',
+        device_guid_invalid: '신뢰할 수 있는 기기 GUID를 가져올 수 없습니다. Apple 계정을 보호하기 위해 Pastel이 로그인을 차단했습니다. 실제 Mac을 사용 중인지 확인하고 macOS를 업데이트한 후 다시 시도하십시오.',
 
         download_progress: '다운로드 진행률: {dMB}MB / {tMB}MB ({pct}%) - 속도: {speed} MB/s',
         dl_chunk_prefix: '청크 다운로드: ',
@@ -401,6 +406,7 @@ const MESSAGES = {
         sign_ok: 'การเซ็น: [OK] เซ็นไฟล์สำเร็จ!',
 
         unknown_provider: 'แหล่งเวอร์ชันที่ไม่รู้จัก: {provider}',
+        device_guid_invalid: 'ไม่สามารถรับ GUID อุปกรณ์ที่เชื่อถือได้ Pastel จึงบล็อกการลงชื่อเข้าใช้เพื่อปกป้องบัญชี Apple โปรดยืนยันว่ากำลังใช้เครื่อง Mac จริง อัปเดต macOS แล้วลองอีกครั้ง',
 
         download_progress: 'ความคืบหน้าการดาวน์โหลด: {dMB}MB / {tMB}MB ({pct}%) - ความเร็ว: {speed} MB/s',
         dl_chunk_prefix: 'ดาวน์โหลดส่วนย่อย: ',
@@ -477,6 +483,7 @@ const MESSAGES = {
         sign_ok: 'Signing: [OK] File signed successfully!',
 
         unknown_provider: 'Unknown version provider: {provider}',
+        device_guid_invalid: 'Unable to obtain a reliable device GUID. Pastel blocked sign-in to protect your Apple Account. Confirm that you are using a physical Mac, update macOS, and try again.',
 
         download_progress: 'Download progress: {dMB}MB / {tMB}MB ({pct}%) - speed: {speed} MB/s',
         dl_chunk_prefix: 'Chunk download: ',

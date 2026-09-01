@@ -10053,6 +10053,86 @@
         }
       }
     },
+    "不可用" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unavailable"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "利用不可"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "사용할 수 없음"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่พร้อมใช้งาน"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法使用"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法使用"
+          }
+        }
+      }
+    },
+    "无法获取可靠的设备 GUID。为保护 Apple 账户，Pastel 已阻止登录。请确认正在使用真实 Mac，并在更新系统后重试。" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unable to obtain a reliable device GUID. Pastel blocked sign-in to protect your Apple Account. Confirm that you are using a physical Mac, update macOS, and try again."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "信頼できるデバイス GUID を取得できません。Apple Account を保護するため、Pastel はサインインを停止しました。実機の Mac を使用していることを確認し、macOS を更新してから再試行してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "신뢰할 수 있는 기기 GUID를 가져올 수 없습니다. Apple 계정을 보호하기 위해 Pastel이 로그인을 차단했습니다. 실제 Mac을 사용 중인지 확인하고 macOS를 업데이트한 후 다시 시도하십시오."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่สามารถรับ GUID อุปกรณ์ที่เชื่อถือได้ Pastel จึงบล็อกการลงชื่อเข้าใช้เพื่อปกป้องบัญชี Apple โปรดยืนยันว่ากำลังใช้เครื่อง Mac จริง อัปเดต macOS แล้วลองอีกครั้ง"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法取得可靠的裝置 GUID。為保護 Apple 帳號，Pastel 已阻止登入。請確認正在使用真正的 Mac，並在更新系統後重試。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法取得可靠的裝置 GUID。為保護 Apple 帳戶，Pastel 已阻止登入。請確認正在使用真正的 Mac，並在更新系統後重試。"
+          }
+        }
+      }
+    },
     "默认账户" : {
       "localizations" : {
         "en" : {

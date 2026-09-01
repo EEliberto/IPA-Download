@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import plist from 'plist';
 import {isAuthFailureResponse} from '../src/client.js';
+import {getDeviceGuid, normalizeDeviceGuid} from '../src/device.js';
 import {Ipa, SESSION_FLOW_VERSION} from '../src/ipa.js';
 import {
     buildLoginBody,
@@ -41,6 +42,37 @@ test('active Store login path does not invoke GSA or Anisette', () => {
     const mainSource = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
     assert.doesNotMatch(clientSource, /\bgsaLogin\b|fetchAnisette|IPA_NATIVE_ANISETTE/);
     assert.doesNotMatch(mainSource, /request-2fa|IPA_NATIVE_ANISETTE/);
+});
+
+test('normalizes valid device GUIDs and rejects privacy placeholders', () => {
+    assert.equal(normalizeDeviceGuid('5c:9b:a6:5d:b0:cf'), '5C9BA65DB0CF');
+    assert.equal(normalizeDeviceGuid('A2-B3-C4-D5-E6-F7'), 'A2B3C4D5E6F7');
+    for (const invalid of [
+        '020000000000',
+        '02:00:00:00:00:00',
+        '000000000000',
+        'FFFFFFFFFFFF',
+        '01:00:5E:00:00:01',
+        '5C9BA65DB0CF00',
+        'not-a-guid',
+    ]) {
+        assert.equal(normalizeDeviceGuid(invalid), '', invalid);
+    }
+});
+
+test('blocks an explicitly supplied invalid device GUID before Apple authentication', () => {
+    const previousGuid = process.env.IPA_DEVICE_GUID;
+    try {
+        process.env.IPA_DEVICE_GUID = '020000000000';
+        assert.throws(() => getDeviceGuid(), (error) => {
+            assert.equal(error.code, 'DEVICE_GUID_INVALID');
+            assert.match(error.message, /设备 GUID/);
+            return true;
+        });
+    } finally {
+        if (previousGuid === undefined) delete process.env.IPA_DEVICE_GUID;
+        else process.env.IPA_DEVICE_GUID = previousGuid;
+    }
 });
 
 test('retries only transient authentication responses used by upstream ipatool', () => {
@@ -196,12 +228,15 @@ test('reports network, SAP rejection, and disabled-account failures precisely', 
 
 test('invalidates legacy sessions and never reuses a session during forced login', async () => {
     const previousSessionDir = process.env.IPA_SESSION_DIR;
+    const previousDeviceGuid = process.env.IPA_DEVICE_GUID;
     const sessionDir = mkdtempSync(join(tmpdir(), 'pastel-session-migration-'));
     const email = 'migration@example.com';
+    const deviceGuid = '5C9BA65DB0CF';
     const digest = createHash('sha256').update(email).digest('hex');
     const sessionFile = join(sessionDir, `${digest}.json`);
     const session = (flowVersion) => ({
         appleAccount: email,
+        deviceGuid,
         flowVersion,
         savedAt: Date.now(),
         user: {
@@ -213,9 +248,10 @@ test('invalidates legacy sessions and never reuses a session during forced login
 
     try {
         process.env.IPA_SESSION_DIR = sessionDir;
+        process.env.IPA_DEVICE_GUID = deviceGuid;
         const app = new Ipa({APPLE_ID: email, PASSWORD: 'password', CODE: ''});
 
-        for (const legacyFlow of ['gsa-srp-v10', 'gsa-srp-v11', 'appstore-direct-v1']) {
+        for (const legacyFlow of ['gsa-srp-v10', 'gsa-srp-v11', 'appstore-direct-v1', 'appstore-sap-v2']) {
             writeFileSync(sessionFile, JSON.stringify(session(legacyFlow)));
             assert.equal(await app.loadReusableSessionEntry(), null, legacyFlow);
             assert.equal(existsSync(sessionFile), false, legacyFlow);
@@ -229,11 +265,18 @@ test('invalidates legacy sessions and never reuses a session during forced login
         assert.equal((await app.loadReusableSessionEntry())?.flowVersion, SESSION_FLOW_VERSION);
         assert.equal(existsSync(sessionFile), true);
 
+        writeFileSync(sessionFile, JSON.stringify({...session(SESSION_FLOW_VERSION), deviceGuid: 'A2B3C4D5E6F7'}));
+        assert.equal(await app.loadReusableSessionEntry(), null);
+        assert.equal(existsSync(sessionFile), false);
+
+        writeFileSync(sessionFile, JSON.stringify(session(SESSION_FLOW_VERSION)));
         assert.equal(await app.loadReusableSessionEntry({force: true}), null);
         assert.equal(existsSync(sessionFile), false);
     } finally {
         if (previousSessionDir === undefined) delete process.env.IPA_SESSION_DIR;
         else process.env.IPA_SESSION_DIR = previousSessionDir;
+        if (previousDeviceGuid === undefined) delete process.env.IPA_DEVICE_GUID;
+        else process.env.IPA_DEVICE_GUID = previousDeviceGuid;
         rmSync(sessionDir, {recursive: true, force: true});
     }
 });

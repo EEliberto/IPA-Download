@@ -13,7 +13,7 @@ const SESSION_TTL_MS = Number(process.env.IPA_SESSION_TTL_MS || 365 * 24 * 60 * 
 // Every authentication implementation gets its own session generation. Never
 // carry cookies or password tokens across generations: Apple binds parts of
 // the StoreServices session to the authentication flow that created them.
-export const SESSION_FLOW_VERSION = 'appstore-sap-v2';
+export const SESSION_FLOW_VERSION = 'appstore-sap-v3-device-guid';
 const ACCEPTED_SESSION_FLOW_VERSIONS = new Set([SESSION_FLOW_VERSION]);
 
 function appSupportDir() {
@@ -33,10 +33,11 @@ function sessionFileFor(email) {
     return path.join(appSupportDir(), `${digest}.json`);
 }
 
-function validSessionFor(email, session) {
+function validSessionFor(email, session, deviceGuid) {
     if (!session || typeof session !== 'object') return false;
     if (!ACCEPTED_SESSION_FLOW_VERSIONS.has(session.flowVersion)) return false;
     if (String(session.appleAccount || '').trim().toLowerCase() !== String(email || '').trim().toLowerCase()) return false;
+    if (session.deviceGuid !== deviceGuid) return false;
     if (SESSION_TTL_MS > 0 && session.savedAt && Date.now() - Number(session.savedAt) > SESSION_TTL_MS) return false;
     const authHeaders = session.user?.authHeaders;
     return Boolean(authHeaders?.['X-Token'] && authHeaders?.['X-Dsid']);
@@ -72,6 +73,7 @@ export class Ipa {
     async saveSession(user) {
         const session = {
             appleAccount: String(this.creds.APPLE_ID || '').trim().toLowerCase(),
+            deviceGuid: Store.guid,
             flowVersion: SESSION_FLOW_VERSION,
             savedAt: Date.now(),
             user: {
@@ -92,13 +94,14 @@ export class Ipa {
     }
 
     async loadReusableSessionEntry({force = false} = {}) {
+        const deviceGuid = Store.guid;
         const session = await this.loadSessionEntry();
         if (!session) return null;
 
         // A forced login must start with a clean cookie jar. Invalid, expired,
         // corrupt, and legacy-flow sessions are removed instead of being fed
         // into a new StoreServices authentication request.
-        if (force || !validSessionFor(this.creds.APPLE_ID, session)) {
+        if (force || !validSessionFor(this.creds.APPLE_ID, session, deviceGuid)) {
             await this.clearSession();
             return null;
         }

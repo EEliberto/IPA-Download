@@ -84,6 +84,7 @@ class Store {
             return await storeLogin(email, password, mfa, this.guid, previousSession?.cookieText || '', previousSession?.pod || '');
         } catch (error) {
             const msg = error.message || String(error);
+            if (error.code === 'DEVICE_GUID_INVALID') throw error;
             if (error.code === 'AUTH_OR_2FA') {
                 const e = new Error(t('login_auth_or_2fa'));
                 e.code = 'AUTH_OR_2FA';

@@ -1,24 +1,35 @@
 import getMAC from 'getmac';
-import crypto from 'crypto';
 import os from 'os';
 import path from 'path';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
+import {t} from './i18n.js';
 
-function normalizeGuid(value) {
+const INVALID_DEVICE_GUIDS = new Set([
+    '000000000000',
+    '020000000000',
+    'FFFFFFFFFFFF',
+]);
+
+export function normalizeDeviceGuid(value) {
     const cleaned = String(value || '').replace(/[^0-9a-f]/gi, '').toUpperCase();
-    return cleaned.length >= 12 ? cleaned.slice(0, 12) : '';
-}
-
-function randomGuid() {
-    return crypto.randomBytes(6).toString('hex').toUpperCase();
+    if (cleaned.length !== 12 || INVALID_DEVICE_GUIDS.has(cleaned)) return '';
+    const firstByte = Number.parseInt(cleaned.slice(0, 2), 16);
+    if (!Number.isFinite(firstByte) || (firstByte & 1) !== 0) return '';
+    return cleaned;
 }
 
 function systemGuid() {
     try {
-        return normalizeGuid(getMAC());
+        return normalizeDeviceGuid(getMAC());
     } catch {
         return '';
     }
+}
+
+function invalidDeviceGuidError() {
+    const error = new Error(t('device_guid_invalid'));
+    error.code = 'DEVICE_GUID_INVALID';
+    return error;
 }
 
 function supportDir() {
@@ -38,25 +49,30 @@ function guidFile() {
 }
 
 export function getDeviceGuid() {
-    const envGuid = normalizeGuid(process.env.IPA_DEVICE_GUID);
-    if (envGuid) return envGuid;
+    if (process.env.IPA_DEVICE_GUID !== undefined) {
+        const envGuid = normalizeDeviceGuid(process.env.IPA_DEVICE_GUID);
+        if (!envGuid) throw invalidDeviceGuidError();
+        return envGuid;
+    }
 
     const file = guidFile();
     try {
         if (existsSync(file)) {
-            const saved = normalizeGuid(readFileSync(file, 'utf8'));
+            const saved = normalizeDeviceGuid(readFileSync(file, 'utf8'));
             if (saved) return saved;
         }
     } catch {
         // Fall through and regenerate.
     }
 
-    const guid = systemGuid() || randomGuid();
+    const guid = systemGuid();
+    if (!guid) throw invalidDeviceGuidError();
     try {
         mkdirSync(path.dirname(file), {recursive: true, mode: 0o700});
         writeFileSync(file, `${guid}\n`, {mode: 0o600});
     } catch {
-        // A stable in-memory value is still better than failing the login.
+        // The Swift host normally provides and persists the GUID. Standalone
+        // callers can still use the stable system value for this process.
     }
     return guid;
 }
