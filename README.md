@@ -1,5 +1,6 @@
 <div align="center">
-  <img src="docs/assets/pastel-app-icon.png" width="148" alt="Pastel App Icon">
+  <img src="https://github.com/user-attachments/assets/f302f5d2-730c-44d2-a2c1-63cdd75804f2" width="148" alt="Pastel App Icon">
+
   <h1>Pastel</h1>
   <p><strong>为 macOS 打造的原生 IPA 历史版本下载工具</strong></p>
   <p>搜索 App、查找历史版本，并将 IPA 轻松传输到 iPhone 或 iPad。</p>
