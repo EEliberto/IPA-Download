@@ -562,9 +562,6 @@
         }
       }
     },
-    "Apple 服务器暂时不可用。请稍后再试。" : {
-
-    },
     "Apple 无法区分密码错误与双重认证。请检查密码；如果已收到验证码，也可以直接输入。" : {
       "localizations" : {
         "en" : {
@@ -601,6 +598,49 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Apple 無法區分密碼錯誤與雙重認證。請檢查密碼；如果已收到驗證碼，也可以直接輸入。"
+          }
+        }
+      }
+    },
+    "Apple 服务器暂时不可用。请稍后再试。" : {
+
+    },
+    "Apple 未返回历史记录，已从官方 App Store 页面获取当前版本。" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple did not return version history. The current version was loaded from the official App Store page."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple から履歴が返されなかったため、公式 App Store ページから現在のバージョンを取得しました。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple에서 버전 기록을 반환하지 않아 공식 App Store 페이지에서 현재 버전을 가져왔습니다."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple ไม่ส่งประวัติเวอร์ชันกลับมา จึงโหลดเวอร์ชันปัจจุบันจากหน้า App Store อย่างเป็นทางการ"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 未傳回歷史記錄，已從官方 App Store 頁面取得目前版本。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 未傳回歷史記錄，已從官方 App Store 頁面取得目前版本。"
           }
         }
       }
@@ -1149,7 +1189,6 @@
       }
     },
     "下载失败" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -2700,6 +2739,9 @@
         }
       }
     },
+    "前进" : {
+
+    },
     "功能切换" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -2937,6 +2979,7 @@
       }
     },
     "双重认证" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -3090,6 +3133,9 @@
           }
         }
       }
+    },
+    "后退" : {
+
     },
     "否" : {
       "localizations" : {
@@ -3486,6 +3532,12 @@
           }
         }
       }
+    },
+    "复制" : {
+
+    },
+    "复制设备 GUID" : {
+
     },
     "大小" : {
       "localizations" : {
@@ -4193,6 +4245,9 @@
           }
         }
       }
+    },
+    "已复制" : {
+
     },
     "已清除本地保存的账户" : {
       "extractionState" : "stale",
@@ -5271,6 +5326,9 @@
         }
       }
     },
+    "支持开发者" : {
+
+    },
     "无" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -5822,6 +5880,7 @@
       }
     },
     "未能从 Apple 获取版本，请改用其他来源。" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -6171,6 +6230,9 @@
           }
         }
       }
+    },
+    "查看下载错误" : {
+
     },
     "查看版本" : {
       "localizations" : {
@@ -7398,6 +7460,9 @@
           }
         }
       }
+    },
+    "添加账户" : {
+
     },
     "清空" : {
       "localizations" : {
@@ -9688,6 +9753,9 @@
         }
       }
     },
+    "选择账户 %@" : {
+
+    },
     "通过 AirDrop 发送" : {
       "localizations" : {
         "en" : {
@@ -9729,7 +9797,6 @@
       }
     },
     "重试下载" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -9809,9 +9876,6 @@
           }
         }
       }
-    },
-    "需要完成 Apple 账户双重认证。请输入验证码后继续。" : {
-
     },
     "需要获取 App" : {
       "localizations" : {
@@ -10049,86 +10113,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "驗證帳戶"
-          }
-        }
-      }
-    },
-    "不可用" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Unavailable"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "利用不可"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "사용할 수 없음"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ไม่พร้อมใช้งาน"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "無法使用"
-          }
-        },
-        "zh-HK" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "無法使用"
-          }
-        }
-      }
-    },
-    "无法获取可靠的设备 GUID。为保护 Apple 账户，Pastel 已阻止登录。请确认正在使用真实 Mac，并在更新系统后重试。" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Unable to obtain a reliable device GUID. Pastel blocked sign-in to protect your Apple Account. Confirm that you are using a physical Mac, update macOS, and try again."
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "信頼できるデバイス GUID を取得できません。Apple Account を保護するため、Pastel はサインインを停止しました。実機の Mac を使用していることを確認し、macOS を更新してから再試行してください。"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "신뢰할 수 있는 기기 GUID를 가져올 수 없습니다. Apple 계정을 보호하기 위해 Pastel이 로그인을 차단했습니다. 실제 Mac을 사용 중인지 확인하고 macOS를 업데이트한 후 다시 시도하십시오."
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ไม่สามารถรับ GUID อุปกรณ์ที่เชื่อถือได้ Pastel จึงบล็อกการลงชื่อเข้าใช้เพื่อปกป้องบัญชี Apple โปรดยืนยันว่ากำลังใช้เครื่อง Mac จริง อัปเดต macOS แล้วลองอีกครั้ง"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "無法取得可靠的裝置 GUID。為保護 Apple 帳號，Pastel 已阻止登入。請確認正在使用真正的 Mac，並在更新系統後重試。"
-          }
-        },
-        "zh-HK" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "無法取得可靠的裝置 GUID。為保護 Apple 帳戶，Pastel 已阻止登入。請確認正在使用真正的 Mac，並在更新系統後重試。"
           }
         }
       }

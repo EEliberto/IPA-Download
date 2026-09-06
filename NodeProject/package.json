@@ -1,12 +1,15 @@
 {
   "name": "ipatool.js",
   "version": "0.2.0",
-  "description": "Test in Node.js 20.19.3 environment",
+  "description": "Pastel embedded App Store client for Node.js 24 LTS",
   "main": "main.js",
   "type": "module",
   "scripts": {
     "start": "node main.js",
     "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24 <25"
   },
   "dependencies": {
     "archiver": "^7.0.1",

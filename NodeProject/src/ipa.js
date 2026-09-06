@@ -1,20 +1,82 @@
 import {promises as fsPromises} from 'fs';
 import os from 'os';
-import {createHash} from 'crypto';
+import {createCipheriv, createDecipheriv, createHash, randomBytes} from 'crypto';
 import path from 'path';
 import {Store} from './client.js';
-import {appPriceInfo} from './catalog.js';
+import {appPriceInfo, storefrontCurrentVersion} from './catalog.js';
+
+function versionIdentifiersFromSong(song) {
+    const metadata = song?.metadata || {};
+    const candidates = [
+        metadata.softwareVersionExternalIdentifiers,
+        song?.softwareVersionExternalIdentifiers,
+        metadata.softwareVersionExternalIdentifier,
+        song?.softwareVersionExternalIdentifier,
+    ];
+    const result = [];
+    const seen = new Set();
+    const append = (value) => {
+        if (Array.isArray(value)) {
+            value.forEach(append);
+            return;
+        }
+        if (value && typeof value === 'object') {
+            append(value.softwareVersionExternalIdentifier ?? value.externalVersionId ?? value.versionId ?? value.id);
+            return;
+        }
+        const id = String(value ?? '').trim();
+        if (!/^\d+$/.test(id) || seen.has(id)) return;
+        seen.add(id);
+        result.push(id);
+    };
+    candidates.forEach(append);
+    return result;
+}
 import {readCookieJar, restoreCookieJar} from './gsa.js';
 import {SignatureClient} from './Signature.js';
 import {download} from './downloader.js';
 import {t} from './i18n.js';
 
-const SESSION_TTL_MS = Number(process.env.IPA_SESSION_TTL_MS || 365 * 24 * 60 * 60 * 1000);
-// Every authentication implementation gets its own session generation. Never
-// carry cookies or password tokens across generations: Apple binds parts of
-// the StoreServices session to the authentication flow that created them.
-export const SESSION_FLOW_VERSION = 'appstore-sap-v3-device-guid';
-const ACCEPTED_SESSION_FLOW_VERSIONS = new Set([SESSION_FLOW_VERSION]);
+const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_MS = Number(process.env.IPA_SESSION_TTL_MS || DEFAULT_SESSION_TTL_MS);
+const SESSION_FLOW_VERSION = 'appstore-direct-v1';
+const ACCEPTED_SESSION_FLOW_VERSIONS = new Set([SESSION_FLOW_VERSION, 'gsa-srp-v10']);
+const ENCRYPTED_SESSION_FORMAT = 'pastel-session-aes-gcm-v1';
+
+function decodeSessionKey(value) {
+    if (!value) return null;
+    const key = Buffer.from(String(value), 'base64');
+    return key.length === 32 ? key : null;
+}
+
+function sealSession(session, keyValue) {
+    const key = Buffer.isBuffer(keyValue) ? keyValue : decodeSessionKey(keyValue);
+    if (!key) throw new Error('A 256-bit session encryption key is required');
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    const ciphertext = Buffer.concat([
+        cipher.update(JSON.stringify(session), 'utf8'),
+        cipher.final(),
+    ]);
+    return {
+        format: ENCRYPTED_SESSION_FORMAT,
+        iv: iv.toString('base64'),
+        tag: cipher.getAuthTag().toString('base64'),
+        ciphertext: ciphertext.toString('base64'),
+    };
+}
+
+function openSession(envelope, keyValue) {
+    const key = Buffer.isBuffer(keyValue) ? keyValue : decodeSessionKey(keyValue);
+    if (!key || envelope?.format !== ENCRYPTED_SESSION_FORMAT) return null;
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.iv, 'base64'));
+    decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
+    const plaintext = Buffer.concat([
+        decipher.update(Buffer.from(envelope.ciphertext, 'base64')),
+        decipher.final(),
+    ]);
+    return JSON.parse(plaintext.toString('utf8'));
+}
 
 function appSupportDir() {
     if (process.env.IPA_SESSION_DIR) return process.env.IPA_SESSION_DIR;
@@ -33,19 +95,21 @@ function sessionFileFor(email) {
     return path.join(appSupportDir(), `${digest}.json`);
 }
 
-function validSessionFor(email, session, deviceGuid) {
+function validSessionFor(email, session) {
     if (!session || typeof session !== 'object') return false;
     if (!ACCEPTED_SESSION_FLOW_VERSIONS.has(session.flowVersion)) return false;
     if (String(session.appleAccount || '').trim().toLowerCase() !== String(email || '').trim().toLowerCase()) return false;
-    if (session.deviceGuid !== deviceGuid) return false;
-    if (SESSION_TTL_MS > 0 && session.savedAt && Date.now() - Number(session.savedAt) > SESSION_TTL_MS) return false;
+    const savedAt = Number(session.savedAt);
+    if (!Number.isFinite(savedAt) || savedAt <= 0) return false;
+    if (SESSION_TTL_MS > 0 && Date.now() - savedAt > SESSION_TTL_MS) return false;
     const authHeaders = session.user?.authHeaders;
     return Boolean(authHeaders?.['X-Token'] && authHeaders?.['X-Dsid']);
 }
 
 export class Ipa {
-    constructor({APPLE_ID, PASSWORD, CODE}) {
+    constructor({APPLE_ID, PASSWORD, CODE, SESSION_KEY = ''}) {
         this.creds = {APPLE_ID, PASSWORD, CODE};
+        this.sessionEncryptionKey = decodeSessionKey(SESSION_KEY);
         this.user = null;
         this.auth = {};
         this.dir = '.';
@@ -58,22 +122,31 @@ export class Ipa {
     async loadSessionEntry() {
         try {
             const raw = await fsPromises.readFile(this.sessionFile, 'utf8');
-            return JSON.parse(raw);
-        } catch (error) {
-            if (error?.code !== 'ENOENT') await this.clearSession();
+            const stored = JSON.parse(raw);
+            if (stored?.format === ENCRYPTED_SESSION_FORMAT) {
+                return openSession(stored, this.sessionEncryptionKey);
+            }
+
+            // One-time migration from the historical plaintext JSON format.
+            // A key must be supplied through the anonymous stdin pipe; otherwise
+            // plaintext sessions are deliberately ignored.
+            if (!this.sessionEncryptionKey) return null;
+            await this.writeEncryptedSession(stored);
+            return stored;
+        } catch {
             return null;
         }
     }
 
     async loadSession() {
-        const session = await this.loadReusableSessionEntry();
-        return session?.user || null;
+        const session = await this.loadSessionEntry();
+        if (!validSessionFor(this.creds.APPLE_ID, session)) return null;
+        return session.user;
     }
 
     async saveSession(user) {
         const session = {
             appleAccount: String(this.creds.APPLE_ID || '').trim().toLowerCase(),
-            deviceGuid: Store.guid,
             flowVersion: SESSION_FLOW_VERSION,
             savedAt: Date.now(),
             user: {
@@ -84,28 +157,25 @@ export class Ipa {
                 cookieText: user.cookieText || '',
             }
         };
+        await this.writeEncryptedSession(session);
+    }
+
+    async writeEncryptedSession(session) {
+        if (!this.sessionEncryptionKey) return;
+        const envelope = sealSession(session, this.sessionEncryptionKey);
         await fsPromises.mkdir(path.dirname(this.sessionFile), {recursive: true, mode: 0o700});
-        await fsPromises.writeFile(this.sessionFile, JSON.stringify(session), {mode: 0o600});
+        const temporaryFile = `${this.sessionFile}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+        try {
+            await fsPromises.writeFile(temporaryFile, JSON.stringify(envelope), {mode: 0o600});
+            await fsPromises.rename(temporaryFile, this.sessionFile);
+        } finally {
+            await fsPromises.rm(temporaryFile, {force: true}).catch(() => {});
+        }
     }
 
     async clearSession() {
         await fsPromises.rm(this.sessionFile, {force: true}).catch(() => {});
         this.usedCachedSession = false;
-    }
-
-    async loadReusableSessionEntry({force = false} = {}) {
-        const deviceGuid = Store.guid;
-        const session = await this.loadSessionEntry();
-        if (!session) return null;
-
-        // A forced login must start with a clean cookie jar. Invalid, expired,
-        // corrupt, and legacy-flow sessions are removed instead of being fed
-        // into a new StoreServices authentication request.
-        if (force || !validSessionFor(this.creds.APPLE_ID, session, deviceGuid)) {
-            await this.clearSession();
-            return null;
-        }
-        return session;
     }
 
     applyUser(user, usedCachedSession) {
@@ -119,14 +189,18 @@ export class Ipa {
     }
 
     async login({force = false} = {}) {
-        const reusableSession = await this.loadReusableSessionEntry({force});
-        if (reusableSession) {
-            console.log(t('login_local_session', {id: this.creds.APPLE_ID}));
-            this.applyUser(reusableSession.user, true);
-            return;
+        const previousSessionEntry = await this.loadSessionEntry();
+        const previousSession = previousSessionEntry?.user || null;
+        if (!force) {
+            const cachedUser = validSessionFor(this.creds.APPLE_ID, previousSessionEntry) ? previousSession : null;
+            if (cachedUser) {
+                console.log(t('login_local_session', {id: this.creds.APPLE_ID}));
+                this.applyUser(cachedUser, true);
+                return;
+            }
         }
 
-        const user = await Store.login(this.creds.APPLE_ID, this.creds.PASSWORD, this.creds.CODE, null);
+        const user = await Store.login(this.creds.APPLE_ID, this.creds.PASSWORD, this.creds.CODE, previousSession);
         console.log(t('login_success', {name: `${user.accountInfo.address.firstName} ${user.accountInfo.address.lastName}`}));
         this.applyUser(user, false);
         await this.saveSession(user).catch(error => {
@@ -172,10 +246,12 @@ export class Ipa {
 
     async _listVersionIdsOnce(APPID) {
         // 先直接查（已购买 / 已获取过的 App 无需再申请许可，不产生任何副作用）。
-        let song = await Store.AppInfo(APPID, '', this.auth).catch(error => ({_error: error}));
+        let song = await Store.AppInfo(APPID, '', this.auth, {listVersions: true}).catch(error => ({_error: error}));
         if (song?._error) {
             // 用稳定的 error.code 判断「缺少许可」，不依赖文案语言；Apple 自身英文消息保留兜底。
-            const noLicense = song._error.code === 'APPINFO_FAIL' || /License not found/i.test(song._error.message || '');
+            const noLicense = song._error.code === 'LICENSE_NOT_FOUND'
+                || song._error.code === 'APPINFO_EMPTY'
+                || /License not found/i.test(song._error.message || '');
             if (!noLicense) throw song._error;
             // 缺少许可：仅免费 App 才主动申请；付费且未购买的 App 直接报错、绝不触发购买。
             if (!(await this.isFreeApp(APPID))) {
@@ -189,13 +265,31 @@ export class Ipa {
                 };
             }
             await Store.purchase(APPID, '', this.auth);
-            song = await Store.AppInfo(APPID, '', this.auth);
+            // Apple 的购买许可会延迟几秒才在 volumeStoreDownloadProduct 可见。
+            // 立即只查一次会把已成功获取的 App 误报为“没有数据”。
+            let lastError;
+            for (const delayMs of [350, 800, 1600, 3000]) {
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+                try {
+                    song = await Store.AppInfo(APPID, '', this.auth, {listVersions: true});
+                    lastError = null;
+                    break;
+                } catch (error) {
+                    lastError = error;
+                    if (error.code !== 'LICENSE_NOT_FOUND' && error.code !== 'APPINFO_EMPTY') throw error;
+                }
+            }
+            if (lastError) {
+                const fallback = await storefrontCurrentVersion(APPID, {
+                    country: process.env.IPA_APP_COUNTRY || 'us',
+                });
+                if (fallback) return fallback;
+                throw lastError;
+            }
         }
         const s = song?.songList?.[0];
         const meta = s?.metadata || {};
-        const ids = Array.isArray(meta.softwareVersionExternalIdentifiers)
-            ? meta.softwareVersionExternalIdentifiers.map(String)
-            : [];
+        const ids = versionIdentifiersFromSong(s);
         return {
             appId: String(APPID),
             name: meta.bundleDisplayName || 'UnknownApp',
@@ -260,3 +354,5 @@ export class Ipa {
         }
     }
 }
+
+export {DEFAULT_SESSION_TTL_MS, openSession, sealSession, versionIdentifiersFromSong};

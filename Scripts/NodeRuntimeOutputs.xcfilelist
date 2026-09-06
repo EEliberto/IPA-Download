@@ -1,0 +1,5 @@
+$(CODESIGNING_FOLDER_PATH)/Contents/Resources/NodeProject/main.js
+$(CODESIGNING_FOLDER_PATH)/Contents/Resources/NodeProject/node_modules/.package-lock.json
+$(CODESIGNING_FOLDER_PATH)/Contents/Resources/node/bin/node
+$(CODESIGNING_FOLDER_PATH)/Contents/Resources/sap-signer
+$(DERIVED_FILE_DIR)/pastel-node-runtime.stamp

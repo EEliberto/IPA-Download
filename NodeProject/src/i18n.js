@@ -21,7 +21,6 @@ const MESSAGES = {
         sign_ok: '软件签名：[OK] 文件签名成功！',
 
         unknown_provider: '未知历史版本来源：{provider}',
-        device_guid_invalid: '无法获取可靠的设备 GUID。为保护 Apple 账户，Pastel 已阻止登录。请确认正在使用真实 Mac，并在更新系统后重试。',
 
         download_progress: '下载进度: {dMB}MB / {tMB}MB ({pct}%) - 速度: {speed} MB/s',
         dl_chunk_prefix: '下载分块：',
@@ -58,10 +57,6 @@ const MESSAGES = {
         gsa_m2_mismatch: 'GSA 服务器校验失败（M2 不匹配）',
         needs_2fa: '需要双重验证码',
         auth_or_2fa: '密码错误或需要双重认证',
-        auth_input_rejected: 'Apple 拒绝了密码与验证码组合。请重新确认密码，并使用最新验证码后再试',
-        account_disabled: '此 Apple 账户已被停用',
-        sap_auth_rejected: 'Apple 拒绝了 SAP 签名认证请求（HTTP 403）',
-        auth_http_failed: 'Apple 认证服务器返回 HTTP {status}',
         store_token_failed: '商店令牌换取失败',
         wrong_code: '验证码不正确或已过期，请重新获取后再试',
         twofa_incomplete: '双重验证未完成，请重试',
@@ -98,7 +93,6 @@ const MESSAGES = {
         sign_ok: '軟件簽署：[OK] 檔案簽署成功！',
 
         unknown_provider: '未知歷史版本來源：{provider}',
-        device_guid_invalid: '無法取得可靠的裝置 GUID。為保護 Apple 帳戶，Pastel 已阻止登入。請確認正在使用真正的 Mac，並在更新系統後重試。',
 
         download_progress: '下載進度: {dMB}MB / {tMB}MB ({pct}%) - 速度: {speed} MB/s',
         dl_chunk_prefix: '下載分塊：',
@@ -135,10 +129,6 @@ const MESSAGES = {
         gsa_m2_mismatch: 'GSA 伺服器校驗失敗（M2 不符）',
         needs_2fa: '需要雙重驗證碼',
         auth_or_2fa: '密碼錯誤或需要雙重認證',
-        auth_input_rejected: 'Apple 拒絕了密碼與驗證碼組合。請重新確認密碼，並使用最新驗證碼後再試',
-        account_disabled: '此 Apple 帳戶已被停用',
-        sap_auth_rejected: 'Apple 拒絕了 SAP 簽署驗證要求（HTTP 403）',
-        auth_http_failed: 'Apple 驗證伺服器回傳 HTTP {status}',
         store_token_failed: '商店權杖換取失敗',
         wrong_code: '驗證碼不正確或已過期，請重新取得後再試',
         twofa_incomplete: '雙重驗證未完成，請重試',
@@ -175,7 +165,6 @@ const MESSAGES = {
         sign_ok: '軟體簽署：[OK] 檔案簽署成功！',
 
         unknown_provider: '未知歷史版本來源：{provider}',
-        device_guid_invalid: '無法取得可靠的裝置 GUID。為保護 Apple 帳號，Pastel 已阻止登入。請確認正在使用真正的 Mac，並在更新系統後重試。',
 
         download_progress: '下載進度: {dMB}MB / {tMB}MB ({pct}%) - 速度: {speed} MB/s',
         dl_chunk_prefix: '下載分塊：',
@@ -212,10 +201,6 @@ const MESSAGES = {
         gsa_m2_mismatch: 'GSA 伺服器校驗失敗（M2 不符）',
         needs_2fa: '需要雙重驗證碼',
         auth_or_2fa: '密碼錯誤或需要雙重驗證',
-        auth_input_rejected: 'Apple 拒絕了密碼與驗證碼組合。請重新確認密碼，並使用最新驗證碼後再試',
-        account_disabled: '此 Apple 帳號已被停用',
-        sap_auth_rejected: 'Apple 拒絕了 SAP 簽章驗證要求（HTTP 403）',
-        auth_http_failed: 'Apple 驗證伺服器回傳 HTTP {status}',
         store_token_failed: '商店權杖換取失敗',
         wrong_code: '驗證碼不正確或已過期，請重新取得後再試',
         twofa_incomplete: '雙重驗證未完成，請重試',
@@ -252,7 +237,6 @@ const MESSAGES = {
         sign_ok: '署名：[OK] ファイルの署名に成功！',
 
         unknown_provider: '不明なバージョン提供元：{provider}',
-        device_guid_invalid: '信頼できるデバイス GUID を取得できません。Apple Account を保護するため、Pastel はサインインを停止しました。実機の Mac を使用していることを確認し、macOS を更新してから再試行してください。',
 
         download_progress: 'ダウンロード進捗: {dMB}MB / {tMB}MB ({pct}%) - 速度: {speed} MB/s',
         dl_chunk_prefix: 'チャンクダウンロード：',
@@ -289,10 +273,6 @@ const MESSAGES = {
         gsa_m2_mismatch: 'GSA サーバー検証に失敗（M2 不一致）',
         needs_2fa: '二要素認証コードが必要です',
         auth_or_2fa: 'パスワードが正しくないか、2ファクタ認証が必要です',
-        auth_input_rejected: 'Apple がパスワードと確認コードの組み合わせを拒否しました。パスワードを確認し、最新のコードでもう一度お試しください',
-        account_disabled: 'この Apple アカウントは無効になっています',
-        sap_auth_rejected: 'Apple が SAP 署名認証要求を拒否しました（HTTP 403）',
-        auth_http_failed: 'Apple 認証サーバーが HTTP {status} を返しました',
         store_token_failed: 'ストアトークンの取得に失敗',
         wrong_code: '確認コードが正しくないか期限切れです。取得し直して再試行してください',
         twofa_incomplete: '二要素認証が完了していません。再試行してください',
@@ -329,7 +309,6 @@ const MESSAGES = {
         sign_ok: '서명: [OK] 파일 서명 성공!',
 
         unknown_provider: '알 수 없는 버전 제공처: {provider}',
-        device_guid_invalid: '신뢰할 수 있는 기기 GUID를 가져올 수 없습니다. Apple 계정을 보호하기 위해 Pastel이 로그인을 차단했습니다. 실제 Mac을 사용 중인지 확인하고 macOS를 업데이트한 후 다시 시도하십시오.',
 
         download_progress: '다운로드 진행률: {dMB}MB / {tMB}MB ({pct}%) - 속도: {speed} MB/s',
         dl_chunk_prefix: '청크 다운로드: ',
@@ -366,10 +345,6 @@ const MESSAGES = {
         gsa_m2_mismatch: 'GSA 서버 검증 실패 (M2 불일치)',
         needs_2fa: '이중 인증 코드가 필요합니다',
         auth_or_2fa: '암호가 잘못되었거나 이중 인증이 필요합니다',
-        auth_input_rejected: 'Apple에서 암호와 확인 코드 조합을 거부했습니다. 암호를 확인하고 최신 코드로 다시 시도하세요',
-        account_disabled: '이 Apple 계정은 비활성화되었습니다',
-        sap_auth_rejected: 'Apple에서 SAP 서명 인증 요청을 거부했습니다(HTTP 403)',
-        auth_http_failed: 'Apple 인증 서버가 HTTP {status}을(를) 반환했습니다',
         store_token_failed: '스토어 토큰 교환 실패',
         wrong_code: '확인 코드가 올바르지 않거나 만료되었습니다. 다시 받은 후 시도하세요',
         twofa_incomplete: '이중 인증이 완료되지 않았습니다. 다시 시도하세요',
@@ -406,7 +381,6 @@ const MESSAGES = {
         sign_ok: 'การเซ็น: [OK] เซ็นไฟล์สำเร็จ!',
 
         unknown_provider: 'แหล่งเวอร์ชันที่ไม่รู้จัก: {provider}',
-        device_guid_invalid: 'ไม่สามารถรับ GUID อุปกรณ์ที่เชื่อถือได้ Pastel จึงบล็อกการลงชื่อเข้าใช้เพื่อปกป้องบัญชี Apple โปรดยืนยันว่ากำลังใช้เครื่อง Mac จริง อัปเดต macOS แล้วลองอีกครั้ง',
 
         download_progress: 'ความคืบหน้าการดาวน์โหลด: {dMB}MB / {tMB}MB ({pct}%) - ความเร็ว: {speed} MB/s',
         dl_chunk_prefix: 'ดาวน์โหลดส่วนย่อย: ',
@@ -443,10 +417,6 @@ const MESSAGES = {
         gsa_m2_mismatch: 'การตรวจสอบเซิร์ฟเวอร์ GSA ล้มเหลว (M2 ไม่ตรงกัน)',
         needs_2fa: 'ต้องใช้รหัสยืนยันสองชั้น',
         auth_or_2fa: 'รหัสผ่านไม่ถูกต้องหรือต้องใช้การยืนยันสองชั้น',
-        auth_input_rejected: 'Apple ปฏิเสธชุดรหัสผ่านและรหัสยืนยัน โปรดตรวจสอบรหัสผ่านและลองอีกครั้งด้วยรหัสล่าสุด',
-        account_disabled: 'บัญชี Apple นี้ถูกปิดใช้งาน',
-        sap_auth_rejected: 'Apple ปฏิเสธคำขอตรวจสอบลายเซ็น SAP (HTTP 403)',
-        auth_http_failed: 'เซิร์ฟเวอร์ตรวจสอบสิทธิ์ของ Apple ส่งคืน HTTP {status}',
         store_token_failed: 'แลกโทเค็นสโตร์ล้มเหลว',
         wrong_code: 'รหัสยืนยันไม่ถูกต้องหรือหมดอายุ โปรดขอใหม่แล้วลองอีกครั้ง',
         twofa_incomplete: 'การยืนยันสองชั้นยังไม่เสร็จ โปรดลองใหม่',
@@ -483,7 +453,6 @@ const MESSAGES = {
         sign_ok: 'Signing: [OK] File signed successfully!',
 
         unknown_provider: 'Unknown version provider: {provider}',
-        device_guid_invalid: 'Unable to obtain a reliable device GUID. Pastel blocked sign-in to protect your Apple Account. Confirm that you are using a physical Mac, update macOS, and try again.',
 
         download_progress: 'Download progress: {dMB}MB / {tMB}MB ({pct}%) - speed: {speed} MB/s',
         dl_chunk_prefix: 'Chunk download: ',
@@ -520,10 +489,6 @@ const MESSAGES = {
         gsa_m2_mismatch: 'GSA server verification failed (M2 mismatch)',
         needs_2fa: 'Two-factor code required',
         auth_or_2fa: 'Incorrect password or two-factor authentication required',
-        auth_input_rejected: 'Apple rejected the password and verification-code combination. Check the password and try again with the latest code',
-        account_disabled: 'This Apple Account is disabled',
-        sap_auth_rejected: 'Apple rejected the SAP-signed authentication request (HTTP 403)',
-        auth_http_failed: 'Apple authentication server returned HTTP {status}',
         store_token_failed: 'Failed to exchange store token',
         wrong_code: 'The verification code is incorrect or expired. Please request a new one and try again',
         twofa_incomplete: 'Two-factor authentication not completed. Please try again',

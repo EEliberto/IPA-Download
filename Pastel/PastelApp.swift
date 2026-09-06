@@ -3,6 +3,7 @@ import Combine
 import CryptoKit
 import Darwin
 import ObjectiveC
+import Observation
 import Security
 import Sparkle
 import SwiftUI
@@ -21,6 +22,7 @@ private extension Notification.Name {
     static let pastelRefreshActivePanel = Notification.Name("PastelRefreshActivePanel")
 }
 
+@MainActor
 private enum ApplicationKeyboardShortcutInterceptor {
     private static var didInstall = false
 
@@ -33,19 +35,17 @@ private enum ApplicationKeyboardShortcutInterceptor {
 
         method_exchangeImplementations(original, replacement)
         didInstall = true
-        KeyboardCommandRouter.shared.installMenuItem()
     }
 }
 
+@MainActor
 private final class KeyboardCommandRouter: NSObject, NSMenuItemValidation {
     static let shared = KeyboardCommandRouter()
 
     private override init() {}
 
     func installMenuItem() {
-        DispatchQueue.main.async {
-            self.patchSelectAllMenuItem()
-        }
+        patchSelectAllMenuItem()
     }
 
     func handle(_ event: NSEvent) -> Bool {
@@ -92,7 +92,9 @@ private final class KeyboardCommandRouter: NSObject, NSMenuItemValidation {
     }
 
     private func patchSelectAllMenuItem() {
-        guard let mainMenu = NSApp.mainMenu else { return }
+        // PastelApp.init() 会在 NSApp 全局变量设置前运行。菜单修补由
+        // WindowChromeConfigurator 在窗口就绪后触发，并通过 shared 避免解包 nil IUO。
+        guard let mainMenu = NSApplication.shared.mainMenu else { return }
         if let item = selectAllMenuItem(in: mainMenu) {
             configureSelectAllMenuItem(item)
             return
@@ -157,7 +159,7 @@ private extension NSApplication {
     }
 }
 
-struct StoredCredentials: Codable {
+struct StoredCredentials: Codable, Sendable {
     var selectedAccountID: UUID?
     var accounts: [StoredAccount]
 
@@ -169,7 +171,7 @@ struct StoredCredentials: Codable {
     }
 }
 
-struct StoredAccount: Codable, Identifiable, Hashable {
+struct StoredAccount: Codable, Identifiable, Hashable, Sendable {
     var id: UUID
     var label: String
     var countryCode: String
@@ -209,22 +211,13 @@ private enum DeviceGUIDStore {
     private static let service = "com.allenmiao.ipahistorydownload.device-guid"
     private static let account = "DeviceIdentifier"
     private static let hexCharacterSet = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
-    private static let invalidIdentifiers: Set<String> = [
-        "000000000000",
-        "020000000000",
-        "FFFFFFFFFFFF"
-    ]
 
-    static func current() throws -> String {
-        if let saved = load() {
+    static func current() -> String {
+        if let saved = load(), !saved.isEmpty {
             return saved
         }
-
-        guard let value = systemIdentifier() else {
-            throw DeviceGUIDError.unavailable
-        }
-
-        try save(value)
+        let value = systemIdentifier() ?? randomIdentifier()
+        try? save(value)
         return value
     }
 
@@ -245,9 +238,7 @@ private enum DeviceGUIDStore {
     }
 
     private static func save(_ value: String) throws {
-        guard let normalized = normalized(value) else {
-            throw DeviceGUIDError.unavailable
-        }
+        guard let normalized = normalized(value) else { return }
         let data = Data(normalized.utf8)
         let update: [String: Any] = [
             kSecValueData as String: data,
@@ -281,19 +272,14 @@ private enum DeviceGUIDStore {
     private static func normalized(_ value: String) -> String? {
         let scalars = value.unicodeScalars.filter { hexCharacterSet.contains($0) }
         let clean = String(String.UnicodeScalarView(scalars)).uppercased()
-        guard clean.count == 12,
-              !invalidIdentifiers.contains(clean),
-              let firstByte = UInt8(clean.prefix(2), radix: 16),
-              firstByte & 1 == 0
-        else {
-            return nil
-        }
-        return clean
+        guard clean.count >= 12 else { return nil }
+        return String(clean.prefix(12))
     }
 
     private static func systemIdentifier() -> String? {
         for interface in ["en0", "en1"] {
-            guard let value = interfaceIdentifier(interface),
+            guard let text = ifconfig(interface),
+                  let value = firstMatch(in: text, pattern: #"ether\s+([0-9a-fA-F:]{17})"#),
                   let guid = normalized(value)
             else {
                 continue
@@ -303,58 +289,43 @@ private enum DeviceGUIDStore {
         return nil
     }
 
-    // Mirrors Asspp/ApplePackage's macOS implementation: query AF_ROUTE with
-    // NET_RT_IFLIST instead of spawning ifconfig from the app process. Terminal
-    // and GUI apps can receive different privacy-filtered command output.
-    private static func interfaceIdentifier(_ interface: String) -> String? {
-        let interfaceIndex = if_nametoindex(interface)
-        guard interfaceIndex != 0 else { return nil }
-
-        var managementInfoBase = [
-            CTL_NET,
-            AF_ROUTE,
-            0,
-            AF_LINK,
-            NET_RT_IFLIST,
-            Int32(interfaceIndex)
-        ]
-        var length: size_t = 0
-
-        guard sysctl(&managementInfoBase, 6, nil, &length, nil, 0) == 0,
-              length > 0
-        else {
+    private static func ifconfig(_ interface: String) -> String? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
+        task.arguments = [interface]
+        let output = Pipe()
+        task.standardOutput = output
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+            guard task.terminationStatus == 0 else { return nil }
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)
+        } catch {
             return nil
         }
-
-        var buffer = [CChar](repeating: 0, count: length)
-        guard sysctl(&managementInfoBase, 6, &buffer, &length, nil, 0) == 0 else {
-            return nil
-        }
-
-        let infoData = Data(bytes: buffer, count: length)
-        let interfaceData = Data(interface.utf8)
-        let searchStart = MemoryLayout<if_msghdr>.stride + 1
-        guard searchStart < infoData.endIndex,
-              let interfaceRange = infoData[searchStart...].range(of: interfaceData)
-        else {
-            return nil
-        }
-
-        let addressStart = interfaceRange.upperBound
-        let addressEnd = addressStart + 6
-        guard addressEnd <= infoData.endIndex else { return nil }
-
-        return infoData[addressStart..<addressEnd]
-            .map { String(format: "%02X", $0) }
-            .joined()
     }
 
-    private enum DeviceGUIDError: LocalizedError {
-        case unavailable
-
-        var errorDescription: String? {
-            String(localized: "无法获取可靠的设备 GUID。为保护 Apple 账户，Pastel 已阻止登录。请确认正在使用真实 Mac，并在更新系统后重试。")
+    private static func firstMatch(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges > 1,
+              let valueRange = Range(match.range(at: 1), in: text)
+        else {
+            return nil
         }
+        return String(text[valueRange])
+    }
+
+    private static func randomIdentifier() -> String {
+        var bytes = [UInt8](repeating: 0, count: 6)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        if status != errSecSuccess {
+            return UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12).uppercased()
+        }
+        return bytes.map { String(format: "%02X", $0) }.joined()
     }
 }
 
@@ -460,6 +431,53 @@ private enum KeychainPasswordStore {
     }
 }
 
+private enum SessionEncryptionKeyStore {
+    private static let service = "com.allenmiao.ipahistorydownload.session-encryption"
+    private static let account = "NodeSessionStorage"
+
+    static func loadOrCreateKey() throws -> Data {
+        var query = baseQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecSuccess, let data = result as? Data, data.count == 32 {
+            return data
+        }
+        guard status == errSecItemNotFound || status == errSecSuccess else {
+            throw CredentialVaultError.keychainOperationFailed("读取会话密钥", status)
+        }
+
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let randomStatus = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard randomStatus == errSecSuccess else {
+            throw CredentialVaultError.keychainOperationFailed("生成会话密钥", randomStatus)
+        }
+        let data = Data(bytes)
+        var addQuery = baseQuery
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrDescription as String] = "Pastel encrypted Apple session storage key"
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        if addStatus == errSecDuplicateItem {
+            return try loadOrCreateKey()
+        }
+        guard addStatus == errSecSuccess else {
+            throw CredentialVaultError.keychainOperationFailed("写入会话密钥", addStatus)
+        }
+        return data
+    }
+
+    private static var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+    }
+}
+
 enum CredentialVault {
     static func save(_ credentials: StoredCredentials) throws {
         try prepareDirectory()
@@ -514,6 +532,10 @@ enum CredentialVault {
 
     static func deletePassword(for accountID: UUID) throws {
         try KeychainPasswordStore.deletePassword(for: accountID)
+    }
+
+    static func sessionEncryptionKey() throws -> String {
+        try SessionEncryptionKeyStore.loadOrCreateKey().base64EncodedString()
     }
 
     private static var metadataURL: URL {
@@ -596,66 +618,6 @@ enum CredentialVault {
     }
 }
 
-private enum StoreSessionMigration {
-    // Must stay in sync with NodeProject/src/ipa.js. This generation is not
-    // compatible with gsa-srp-v10, gsa-srp-v11, or appstore-direct-v1.
-    private static let currentFlowVersion = "appstore-sap-v2"
-
-    static func invalidateLegacySessions() -> Bool {
-        let fileManager = FileManager.default
-        guard let files = try? fileManager.contentsOfDirectory(
-            at: sessionsDirectoryURL,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else {
-            return false
-        }
-
-        var removedAny = false
-        for file in files where file.pathExtension.lowercased() == "json" {
-            let flowVersion: String? = {
-                guard let data = try? Data(contentsOf: file),
-                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else {
-                    return nil
-                }
-                return object["flowVersion"] as? String
-            }()
-
-            guard flowVersion != currentFlowVersion else { continue }
-            if (try? fileManager.removeItem(at: file)) != nil {
-                removedAny = true
-            }
-        }
-        return removedAny
-    }
-
-    static func deleteSession(for appleAccount: String) {
-        let normalized = appleAccount
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard !normalized.isEmpty else { return }
-        let digest = SHA256.hash(data: Data(normalized.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
-        try? FileManager.default.removeItem(
-            at: sessionsDirectoryURL.appendingPathComponent("\(digest).json")
-        )
-    }
-
-    static func deleteAllSessions() {
-        try? FileManager.default.removeItem(at: sessionsDirectoryURL)
-    }
-
-    private static var sessionsDirectoryURL: URL {
-        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        return baseURL
-            .appendingPathComponent(appDisplayName, isDirectory: true)
-            .appendingPathComponent("sessions", isDirectory: true)
-    }
-}
-
 enum NodeRuntimeError: LocalizedError {
     case missingResourceDirectory
     case missingProject(URL)
@@ -701,6 +663,23 @@ struct NodeRuntime {
         environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         environment["IPA_LANG"] = AppLanguage.effectiveCode
         return environment
+    }
+
+    static func credentialInput(appleAccount: String, password: String, code: String) throws -> (pipe: Pipe, data: Data) {
+        let payload = NodeCredentialPayload(
+            appleAccount: appleAccount,
+            password: password,
+            code: code,
+            sessionKey: try CredentialVault.sessionEncryptionKey()
+        )
+        var data = try JSONEncoder().encode(payload)
+        data.append(0x0A)
+        return (Pipe(), data)
+    }
+
+    static func sendCredentialInput(_ data: Data, through pipe: Pipe) throws {
+        try pipe.fileHandleForWriting.write(contentsOf: data)
+        try pipe.fileHandleForWriting.close()
     }
 
     static func runJSON(arguments: [String], timeout: TimeInterval = 30) async throws -> Data {
@@ -780,6 +759,13 @@ struct RunConfig {
     var removeAppStoreUpdateMetadata: Bool = false
 }
 
+private struct NodeCredentialPayload: Encodable, Sendable {
+    let appleAccount: String
+    let password: String
+    let code: String
+    let sessionKey: String
+}
+
 struct WindowChromeConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -803,75 +789,6 @@ struct WindowChromeConfigurator: NSViewRepresentable {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = false
-    }
-}
-
-private struct GlassEffectDisplayInvalidator: NSViewRepresentable {
-    let trigger: Int
-
-    func makeNSView(context: Context) -> NSView {
-        NSView(frame: .zero)
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        scheduleRefresh(from: nsView)
-    }
-
-    private func scheduleRefresh(from nsView: NSView) {
-        DispatchQueue.main.async {
-            refresh(from: nsView)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-            refresh(from: nsView)
-        }
-    }
-
-    private func refresh(from nsView: NSView) {
-        guard let contentView = nsView.window?.contentView else { return }
-        contentView.needsLayout = true
-        contentView.layoutSubtreeIfNeeded()
-        refreshScrollEdgeState(in: contentView)
-        contentView.needsDisplay = true
-        contentView.setNeedsDisplay(contentView.bounds)
-        contentView.displayIfNeeded()
-    }
-
-    private func refreshScrollEdgeState(in view: NSView) {
-        if let scrollView = view as? NSScrollView {
-            nudgeScrollEdgeState(for: scrollView)
-        }
-
-        for subview in view.subviews {
-            refreshScrollEdgeState(in: subview)
-        }
-    }
-
-    private func nudgeScrollEdgeState(for scrollView: NSScrollView) {
-        guard let documentView = scrollView.documentView else { return }
-
-        let clipView = scrollView.contentView
-        let originalOrigin = clipView.bounds.origin
-        let maxY = max(0, documentView.bounds.height - clipView.bounds.height)
-        guard maxY > 0 else { return }
-
-        let delta: CGFloat
-        if originalOrigin.y < maxY {
-            delta = min(0.75, maxY - originalOrigin.y)
-        } else {
-            delta = -min(0.75, originalOrigin.y)
-        }
-
-        guard delta != 0 else { return }
-
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            context.allowsImplicitAnimation = false
-
-            clipView.scroll(to: NSPoint(x: originalOrigin.x, y: originalOrigin.y + delta))
-            scrollView.reflectScrolledClipView(clipView)
-            clipView.scroll(to: originalOrigin)
-            scrollView.reflectScrolledClipView(clipView)
-        }
     }
 }
 
@@ -1073,6 +990,13 @@ enum JobStatus: Equatable {
     }
 }
 
+struct DownloadFailure: Identifiable, Equatable {
+    let id = UUID()
+    let jobID: String
+    let label: String
+    let message: String
+}
+
 struct AppLanguage: Identifiable, Hashable {
     let code: String
     var id: String { code }
@@ -1137,16 +1061,17 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 private let credentialSaveQueue = DispatchQueue(label: "com.allenmiao.ipadownload.credentialsave", qos: .utility)
 
 @MainActor
-final class AccountStore: ObservableObject {
-    @Published private(set) var accounts: [StoredAccount] = []
-    @Published var selectedAccountID: UUID?
-    @Published var statusMessage: String = ""
+@Observable
+final class AccountStore {
+    private(set) var accounts: [StoredAccount] = []
+    var selectedAccountID: UUID?
+    var statusMessage: String = ""
 
-    @Published var isValidating = false
-    @Published var validationMessage = ""
-    @Published var needsCode = false
-    @Published var saveTick = 0
-    @Published var reloginRequestID: UUID?
+    var isValidating = false
+    var validationMessage = ""
+    var needsCode = false
+    var saveTick = 0
+    var reloginRequestID: UUID?
 
     private var process: Process?
     private var pipes: (Pipe, Pipe)?
@@ -1175,16 +1100,11 @@ final class AccountStore: ObservableObject {
     }
 
     func load() {
-        let invalidatedLegacySession = StoreSessionMigration.invalidateLegacySessions()
         do {
             if let creds = try CredentialVault.load() {
                 accounts = creds.accounts
                 selectedAccountID = creds.selectedAccountID ?? accounts.first?.id
                 statusMessage = accounts.isEmpty ? "" : String(localized: "已载入 \(accounts.count) 个 Apple 账户")
-                if invalidatedLegacySession, let selectedAccountID {
-                    statusMessage = String(localized: "Apple 账户会话已失效。请重新登录后再试。")
-                    reloginRequestID = selectedAccountID
-                }
             }
         } catch {
             statusMessage = error.localizedDescription
@@ -1205,12 +1125,10 @@ final class AccountStore: ObservableObject {
     func delete(_ account: StoredAccount) {
         let wasSelected = account.id == selectedAccountID
         try? CredentialVault.deletePassword(for: account.id)
-        StoreSessionMigration.deleteSession(for: account.appleAccount)
         accounts.removeAll { $0.id == account.id }
         guard !accounts.isEmpty else {
             selectedAccountID = nil
             try? CredentialVault.deleteStoredCredentials()
-            StoreSessionMigration.deleteAllSessions()
             statusMessage = String(localized: "已删除 \(account.displayLabel)")
             return
         }
@@ -1221,13 +1139,16 @@ final class AccountStore: ObservableObject {
     private func persist(_ message: String) {
         statusMessage = message
         let snapshot = StoredCredentials(selectedAccountID: selectedAccountID, accounts: accounts)
+        let reportError: @MainActor @Sendable (String) -> Void = { [weak self] description in
+            self?.statusMessage = description
+        }
         credentialSaveQueue.async {
             do {
                 try CredentialVault.save(snapshot)
             } catch {
                 let description = error.localizedDescription
-                Task { @MainActor [weak self] in
-                    self?.statusMessage = description
+                Task { @MainActor in
+                    reportError(description)
                 }
             }
         }
@@ -1281,18 +1202,16 @@ final class AccountStore: ObservableObject {
 
     private func runValidation(code: String) {
         guard let pending else { return }
-        let deviceGUID: String
-        do {
-            deviceGUID = try DeviceGUIDStore.current()
-        } catch {
-            isValidating = false
-            needsCode = false
-            validationMessage = error.localizedDescription
-            return
-        }
-
         let runtime: (projectURL: URL, mainURL: URL, nodeURL: URL)
-        do { runtime = try NodeRuntime.locate() }
+        let credentialInput: (pipe: Pipe, data: Data)
+        do {
+            runtime = try NodeRuntime.locate()
+            credentialInput = try NodeRuntime.credentialInput(
+                appleAccount: pending.email,
+                password: pending.password,
+                code: code
+            )
+        }
         catch { isValidating = false; validationMessage = error.localizedDescription; return }
 
         isValidating = true
@@ -1304,14 +1223,13 @@ final class AccountStore: ObservableObject {
         task.arguments = ["main.js"]
         task.currentDirectoryURL = runtime.projectURL
         var env = NodeRuntime.baseEnvironment()
-        env["APPLE_ID"] = pending.email
-        env["APPLE_PWD"] = pending.password
-        env["APPLE_CODE"] = code
+        env["IPA_CREDENTIALS_STDIN"] = "1"
         env["IPA_VALIDATE_LOGIN"] = "1"
         env["IPA_FORCE_LOGIN"] = "1"
-        env["IPA_DEVICE_GUID"] = deviceGUID
+        env["IPA_DEVICE_GUID"] = DeviceGUIDStore.current()
         if let sessionURL = Self.sessionDirectoryURL() { env["IPA_SESSION_DIR"] = sessionURL.path }
         task.environment = env
+        task.standardInput = credentialInput.pipe
 
         let out = Pipe(); let err = Pipe()
         task.standardOutput = out; task.standardError = err
@@ -1331,8 +1249,17 @@ final class AccountStore: ObservableObject {
                 self?.finishValidation(exitCode: exit)
             }
         }
-        do { try task.run(); process = task }
-        catch { cleanup(); isValidating = false; validationMessage = error.localizedDescription }
+        do {
+            try task.run()
+            process = task
+            try NodeRuntime.sendCredentialInput(credentialInput.data, through: credentialInput.pipe)
+        } catch {
+            try? credentialInput.pipe.fileHandleForWriting.close()
+            if task.isRunning { task.terminate() }
+            cleanup()
+            isValidating = false
+            validationMessage = error.localizedDescription
+        }
     }
 
     private func finishValidation(exitCode: Int32) {
@@ -1416,7 +1343,8 @@ final class AccountStore: ObservableObject {
 }
 
 @MainActor
-final class DownloadManager: ObservableObject {
+@Observable
+final class DownloadManager {
     struct Job: Identifiable {
         let id: String
         var label: String
@@ -1428,37 +1356,43 @@ final class DownloadManager: ObservableObject {
         var awaitingSession: Bool = false
     }
 
-    @Published private(set) var jobs: [String: Job] = [:]
+    private(set) var jobs: [String: Job] = [:]
+    private(set) var latestFailure: DownloadFailure?
     private var processes: [String: Process] = [:]
     private var pipes: [String: (Pipe, Pipe)] = [:]
     private var configs: [String: RunConfig] = [:]
 
-    var anyRunning: Bool { !processes.isEmpty }
-    var runningCount: Int { processes.count }
-    func isRunning(_ id: String) -> Bool { processes[id] != nil }
+    var anyRunning: Bool { processes.values.contains(where: \.isRunning) }
+    var runningCount: Int { processes.values.count(where: \.isRunning) }
+    func isRunning(_ id: String) -> Bool { processes[id]?.isRunning == true }
     func job(_ id: String) -> Job? { jobs[id] }
     var firstJobNeedingCode: Job? { jobs.values.first { $0.needsCode } }
     var codeNeededJobID: String? { jobs.values.first { $0.needsCode }?.id }
     var focusJob: Job? {
-        jobs.values.first { processes[$0.id] != nil } ?? jobs.values.first
+        jobs.values.first { processes[$0.id]?.isRunning == true } ?? jobs.values.first
     }
 
     func start(id: String, label: String, config: RunConfig) {
-        guard processes[id] == nil else { return }
+        if let existingProcess = processes[id] {
+            guard !existingProcess.isRunning else { return }
+            cleanup(id: id)
+        }
         configs[id] = config
 
-        let deviceGUID: String
-        do {
-            deviceGUID = try DeviceGUIDStore.current()
-        } catch {
-            jobs[id] = Job(id: id, label: label, status: .failed, log: error.localizedDescription + "\n", progress: nil)
-            return
-        }
-
         let runtime: (projectURL: URL, mainURL: URL, nodeURL: URL)
-        do { runtime = try NodeRuntime.locate() }
+        let credentialInput: (pipe: Pipe, data: Data)
+        do {
+            runtime = try NodeRuntime.locate()
+            credentialInput = try NodeRuntime.credentialInput(
+                appleAccount: config.appleAccount,
+                password: config.password,
+                code: config.code
+            )
+        }
         catch {
-            jobs[id] = Job(id: id, label: label, status: .failed, log: error.localizedDescription + "\n", progress: nil)
+            let job = Job(id: id, label: label, status: .failed, log: error.localizedDescription + "\n", progress: nil)
+            jobs[id] = job
+            publishFailure(for: job)
             return
         }
 
@@ -1469,21 +1403,20 @@ final class DownloadManager: ObservableObject {
         task.arguments = ["main.js"]
         task.currentDirectoryURL = runtime.projectURL
         var env = NodeRuntime.baseEnvironment()
-        env["APPLE_ID"] = config.appleAccount
-        env["APPLE_PWD"] = config.password
-        env["APPLE_CODE"] = config.code
+        env["IPA_CREDENTIALS_STDIN"] = "1"
         env["DOWNLOAD_APPID"] = config.appID
         env["DOWNLOAD_VERSION_ID"] = config.versionID
         env["DOWNLOAD_DIR"] = config.downloadDir
         if config.listVersionIDs { env["IPA_LIST_VERSION_IDS"] = "1" }
         if config.validateLogin { env["IPA_VALIDATE_LOGIN"] = "1" }
         if config.allowAppAcquisition { env["IPA_ALLOW_APP_ACQUIRE"] = "1" }
-        env["IPA_DEVICE_GUID"] = deviceGUID
+        env["IPA_DEVICE_GUID"] = DeviceGUIDStore.current()
         if !config.appIsFree.isEmpty { env["IPA_APP_IS_FREE"] = config.appIsFree }
         env["IPA_APP_COUNTRY"] = config.appCountry
         if config.removeAppStoreUpdateMetadata { env["IPA_REMOVE_APP_STORE_UPDATE_METADATA"] = "1" }
         if let sessionURL = Self.sessionDirectoryURL() { env["IPA_SESSION_DIR"] = sessionURL.path }
         task.environment = env
+        task.standardInput = credentialInput.pipe
 
         let stdout = Pipe(); let stderr = Pipe()
         task.standardOutput = stdout; task.standardError = stderr
@@ -1508,13 +1441,20 @@ final class DownloadManager: ObservableObject {
             }
         }
 
-        do { try task.run(); processes[id] = task }
+        do {
+            try task.run()
+            processes[id] = task
+            try NodeRuntime.sendCredentialInput(credentialInput.data, through: credentialInput.pipe)
+        }
         catch {
+            try? credentialInput.pipe.fileHandleForWriting.close()
+            if task.isRunning { task.terminate() }
             cleanup(id: id)
             var j = jobs[id] ?? Job(id: id, label: label)
             j.status = .failed; j.progress = nil
             j.log += String(localized: "无法启动内置 Node：\(error.localizedDescription)") + "\n"
             jobs[id] = j
+            publishFailure(for: j)
         }
     }
 
@@ -1572,7 +1512,16 @@ final class DownloadManager: ObservableObject {
             job.needsCode = ipaIsVerificationChallenge(job.log)
             job.log += "\n" + String(localized: "任务结束，退出码：\(Int(exitCode))") + "\n"
             jobs[id] = job
+            if !job.needsCode { publishFailure(for: job) }
         }
+    }
+
+    private func publishFailure(for job: Job) {
+        latestFailure = DownloadFailure(
+            jobID: job.id,
+            label: job.label,
+            message: downloadErrorMessage(from: job.log)
+        )
     }
 
     private func cleanup(id: String) {
@@ -1651,7 +1600,7 @@ struct VersionsResponse: Decodable {
     let errors: [String]
 }
 
-struct DownloadedItem: Identifiable, Hashable {
+struct DownloadedItem: Identifiable, Hashable, Sendable {
     let id: String
     let fileURL: URL
     let appName: String
@@ -1731,7 +1680,7 @@ private enum AppSearchPlatform: String, CaseIterable, Identifiable {
     }
 }
 
-private enum IPADownloadVariant: String {
+private enum IPADownloadVariant: String, Sendable {
     case original
     case noUpdates
 
@@ -1848,24 +1797,25 @@ private extension String {
 }
 
 @MainActor
-final class CatalogViewModel: ObservableObject {
-    @Published var searchQuery = ""
-    @Published var country = "cn"
-    @Published var platform = AppSearchPlatform.iphone.rawValue
-    @Published var searchResults: [AppSearchResult] = []
-    @Published var selectedSearchID: String?
-    @Published var searchStatus = String(localized: "正在加载 App...")
-    @Published var isSearching = false
-    @Published var isLoadingMoreFeatured = false
-    @Published var isShowingFeatured = true
-    @Published var canLoadMoreFeatured = false
+@Observable
+final class CatalogViewModel {
+    var searchQuery = ""
+    var country = "cn"
+    var platform = AppSearchPlatform.iphone.rawValue
+    var searchResults: [AppSearchResult] = []
+    var selectedSearchID: String?
+    var searchStatus = String(localized: "正在加载 App...")
+    var isSearching = false
+    var isLoadingMoreFeatured = false
+    var isShowingFeatured = true
+    var canLoadMoreFeatured = false
 
-    @Published var historyAppID = ""
-    @Published var historyProvider = "auto"
-    @Published var versionResults: [VersionRecord] = []
-    @Published var selectedVersionID: String?
-    @Published var versionStatus = String(localized: "输入 App ID 以查询历史版本。")
-    @Published var isLoadingVersions = false
+    var historyAppID = ""
+    var historyProvider = "auto"
+    var versionResults: [VersionRecord] = []
+    var selectedVersionID: String?
+    var versionStatus = String(localized: "输入 App ID 以查询历史版本。")
+    var isLoadingVersions = false
 
     var selectedSearchResult: AppSearchResult? {
         searchResults.first { $0.id == selectedSearchID }
@@ -2098,59 +2048,22 @@ struct ContentView: View {
         case ready
     }
 
-    private enum DownloadSelectionScope {
-        case appGroups
-        case versions
-    }
-
     private enum ActiveField: Hashable {
         case search
         case manualAppID
         case manualVersionID
     }
 
-    @EnvironmentObject private var accountStore: AccountStore
+    @Environment(AccountStore.self) private var accountStore
     @Environment(\.openWindow) private var openWindow
-    @StateObject private var downloads = DownloadManager()
-    @StateObject private var catalog = CatalogViewModel()
-
+    @State private var downloads = DownloadManager()
+    @State private var catalog = CatalogViewModel()
     @State private var rightPanel = RightPanelMode.search
-    @State private var glassRefreshToken = 0
-    @State private var pendingVerificationCode = ""
-    @State private var showingVerificationPrompt = false
-    @State private var pendingCodeJobID: String?
-    @State private var saveMessage = ""
-    @State private var didLoadCredentials = false
-    @State private var hoveredMode: RightPanelMode?
-    @State private var selectedApp: AppSearchResult?
-    @State private var selectedAppLocalIconPath: String?
-    @State private var selectedVersion: VersionRecord?
-    @State private var selectedVersionIDs: Set<String> = []
-    @State private var lastSelectedVersionID: String?
-    @State private var downloadedFiles: [String: URL] = [:]
-    @State private var versionIcons: [String: NSImage] = [:]
-    @State private var remoteAppIcons: [String: NSImage] = [:]
-    @State private var downloadedVersionIDs: [String: URL] = [:]
-    @State private var downloadedItems: [DownloadedItem] = []
-    @State private var noUpdateSelections: [String: Bool] = [:]
-    @State private var selectedDownloadedItemID: String?
-    @State private var selectedDownloadedItemIDs: Set<String> = []
-    @State private var lastSelectedDownloadedItemID: String?
-    @State private var selectedDownloadedGroupID: String?
-    @State private var selectedDownloadedGroupIDs: Set<String> = []
-    @State private var lastSelectedDownloadedGroupID: String?
-    @State private var downloadSelectionScope: DownloadSelectionScope = .appGroups
-    @State private var downloadSearchQuery = ""
-    @State private var expandedGroups: Set<String> = []
-    @State private var manualAppID = ""
-    @State private var manualVersionID = ""
-    @State private var manualNoUpdate = false
-    @State private var manualLatestDownloadedPath: String?
-    @State private var manualLatestDownloadedJobID: String?
-    @State private var appleVersionFetchNeedsAcquisition = false
-    @State private var storefrontReloadTask: Task<Void, Never>?
-    @State private var downloadLibraryRefreshTask: Task<Void, Never>?
-    @State private var iconPathsBeingLoaded: Set<String> = []
+    @State private var accountFeature = AccountFeatureState()
+    @State private var searchFeature = SearchFeatureState()
+    @State private var versionFeature = VersionHistoryFeatureState()
+    @State private var libraryFeature = DownloadLibraryFeatureState()
+    @State private var taskFeature = TaskLogFeatureState()
     @Namespace private var manualActionGlassNamespace
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var activeField: ActiveField?
@@ -2177,38 +2090,23 @@ struct ContentView: View {
     private var activeStatus: String { downloads.anyRunning ? String(localized: "运行中") : (downloads.focusJob?.status.displayName ?? String(localized: "就绪")) }
     private func versionIsRunning(_ id: String?) -> Bool { id.map { downloads.isRunning($0) } ?? false }
     private func noUpdateEnabled(for record: VersionRecord) -> Bool {
-        noUpdateSelections[record.versionId.isEmpty ? record.id : record.versionId] ?? false
+        versionFeature.noUpdateSelections[record.versionId.isEmpty ? record.id : record.versionId] ?? false
     }
     private func setNoUpdateEnabled(_ enabled: Bool, for record: VersionRecord) {
-        noUpdateSelections[record.versionId.isEmpty ? record.id : record.versionId] = enabled
+        versionFeature.noUpdateSelections[record.versionId.isEmpty ? record.id : record.versionId] = enabled
     }
     private func downloadJobID(for record: VersionRecord, removesAppStoreUpdates: Bool) -> String {
         "\(record.id)-\(IPADownloadVariant(removeAppStoreUpdateMetadata: removesAppStoreUpdates).rawValue)"
     }
     private func selectedDownloadJobID() -> String? {
-        guard let selectedVersion else { return nil }
+        guard let selectedVersion = versionFeature.selectedVersion else { return nil }
         return downloadJobID(for: selectedVersion, removesAppStoreUpdates: noUpdateEnabled(for: selectedVersion))
     }
 
     var body: some View {
         mainWorkspace
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    floatingModeBar
-                }
-                .sharedBackgroundVisibility(.hidden)
-
-                ToolbarItem(placement: .primaryAction) {
-                    toolbarSupportButton
-                }
-                .sharedBackgroundVisibility(.hidden)
-
-                ToolbarItem(placement: .primaryAction) {
-                    toolbarSettingsButton
-                }
-                .sharedBackgroundVisibility(.hidden)
-            }
+            .toolbar { adaptiveMainToolbar }
             .toolbar(removing: .title)
         .background(appBackground)
         .background(
@@ -2226,7 +2124,6 @@ struct ContentView: View {
             .frame(width: 0, height: 0)
         )
         .background(WindowChromeConfigurator())
-        .background(GlassEffectDisplayInvalidator(trigger: glassRefreshToken))
         .frame(minWidth: 1100, minHeight: 680)
         .onAppear(perform: loadSavedValuesOnce)
         .onAppear { refreshDownloadedFiles() }
@@ -2245,8 +2142,8 @@ struct ContentView: View {
         }
         .onChange(of: accountStore.selectedAccountID) { _, _ in
             let country = accountStore.selectedAccount?.countryCode ?? selectedCountryCode
-            storefrontReloadTask?.cancel()
-            storefrontReloadTask = Task { @MainActor in
+            searchFeature.storefrontReloadTask?.cancel()
+            searchFeature.storefrontReloadTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 350_000_000)
                 guard !Task.isCancelled else { return }
                 applyStorefrontCountry(country, reload: true)
@@ -2259,22 +2156,22 @@ struct ContentView: View {
             }
         }
         .onChange(of: downloads.codeNeededJobID) { _, jobID in
-            if let jobID, !showingVerificationPrompt {
-                pendingCodeJobID = jobID
-                pendingVerificationCode = ""
-                showingVerificationPrompt = true
+            if let jobID, !accountFeature.showingVerificationPrompt {
+                accountFeature.pendingCodeJobID = jobID
+                accountFeature.pendingVerificationCode = ""
+                accountFeature.showingVerificationPrompt = true
             }
         }
         .onChange(of: downloadDir) { _, _ in refreshDownloadedFiles() }
         .onChange(of: catalog.versionResults) { _, results in
             refreshDownloadedFiles()
             let validIDs = Set(results.map(\.id))
-            selectedVersionIDs.formIntersection(validIDs)
-            if let lastSelectedVersionID, !validIDs.contains(lastSelectedVersionID) {
-                self.lastSelectedVersionID = nil
+            versionFeature.selectedVersionIDs.formIntersection(validIDs)
+            if let lastSelectedVersionID = versionFeature.lastSelectedVersionID, !validIDs.contains(lastSelectedVersionID) {
+                self.versionFeature.lastSelectedVersionID = nil
             }
-            if let selectedVersion, !validIDs.contains(selectedVersion.id) {
-                self.selectedVersion = nil
+            if let selectedVersion = versionFeature.selectedVersion, !validIDs.contains(selectedVersion.id) {
+                self.versionFeature.selectedVersion = nil
                 downloadVersionID = ""
                 catalog.selectedVersionID = nil
             }
@@ -2282,7 +2179,6 @@ struct ContentView: View {
         .onChange(of: rightPanel) { _, panel in
             activeField = nil
             if panel == .download { refreshDownloadedFiles() }
-            refreshGlassEffectDisplay()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshDownloadedFiles()
@@ -2294,22 +2190,59 @@ struct ContentView: View {
                 downloads.remove(id: Self.versionIDsFetchJobKey)
             }
         }
-        .alert(String(localized: "登录"), isPresented: $showingVerificationPrompt) {
-            TextField(String(localized: "验证码"), text: $pendingVerificationCode)
+        .alert(String(localized: "登录"), isPresented: $accountFeature.showingVerificationPrompt) {
+            TextField(String(localized: "验证码"), text: $accountFeature.pendingVerificationCode)
             Button(String(localized: "继续")) {
                 submitVerificationCode()
             }
             Button(String(localized: "登录")) {
-                pendingVerificationCode = ""
-                pendingCodeJobID = nil
+                accountFeature.pendingVerificationCode = ""
+                accountFeature.pendingCodeJobID = nil
                 showRelogin()
             }
             Button(String(localized: "取消"), role: .cancel) {
-                pendingVerificationCode = ""
-                pendingCodeJobID = nil
+                accountFeature.pendingVerificationCode = ""
+                accountFeature.pendingCodeJobID = nil
             }
         } message: {
             Text(String(localized: "Apple 无法区分密码错误与双重认证。请检查密码；如果已收到验证码，也可以直接输入。"))
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var adaptiveMainToolbar: some ToolbarContent {
+        if #available(macOS 26.1, *) {
+            ToolbarItem(placement: .principal) {
+                floatingModeBar
+            }
+            .sharedBackgroundVisibility(.hidden)
+            .visibilityPriority(.high)
+
+            ToolbarItem(placement: .primaryAction) {
+                toolbarSupportButton
+            }
+            .sharedBackgroundVisibility(.hidden)
+
+            ToolbarItem(placement: .primaryAction) {
+                toolbarSettingsButton
+            }
+            .sharedBackgroundVisibility(.hidden)
+            .visibilityPriority(.high)
+        } else {
+            ToolbarItem(placement: .principal) {
+                floatingModeBar
+            }
+            .sharedBackgroundVisibility(.hidden)
+
+            ToolbarItem(placement: .primaryAction) {
+                toolbarSupportButton
+            }
+            .sharedBackgroundVisibility(.hidden)
+
+            ToolbarItem(placement: .primaryAction) {
+                toolbarSettingsButton
+            }
+            .sharedBackgroundVisibility(.hidden)
         }
     }
 
@@ -2330,6 +2263,8 @@ struct ContentView: View {
                 .glassEffect(.regular, in: Circle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(String(localized: "设置"))
+        .help(String(localized: "设置"))
     }
 
     private var toolbarSupportButton: some View {
@@ -2344,6 +2279,8 @@ struct ContentView: View {
                 .glassEffect(.regular, in: Circle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(String(localized: "支持开发者"))
+        .help(String(localized: "支持开发者"))
     }
 
     private func showSettings() {
@@ -2382,7 +2319,7 @@ struct ContentView: View {
                                 if rightPanel == mode {
                                     Capsule()
                                         .fill(modeSelectionFill)
-                                } else if hoveredMode == mode {
+                                } else if searchFeature.hoveredMode == mode {
                                     Capsule()
                                         .fill(modeHoverFill)
                                 }
@@ -2392,9 +2329,9 @@ struct ContentView: View {
                     .foregroundStyle(rightPanel == mode ? modeSelectionText : Color.secondary)
                     .onHover { isHovering in
                         if isHovering {
-                            hoveredMode = mode
-                        } else if hoveredMode == mode {
-                            hoveredMode = nil
+                            searchFeature.hoveredMode = mode
+                        } else if searchFeature.hoveredMode == mode {
+                            searchFeature.hoveredMode = nil
                         }
                     }
 
@@ -2466,8 +2403,8 @@ struct ContentView: View {
         guard index < modes.count - 1 else { return false }
         return modes[index] != rightPanel
             && modes[index + 1] != rightPanel
-            && modes[index] != hoveredMode
-            && modes[index + 1] != hoveredMode
+            && modes[index] != searchFeature.hoveredMode
+            && modes[index + 1] != searchFeature.hoveredMode
     }
 
     private var mainWorkspace: some View {
@@ -2495,22 +2432,22 @@ struct ContentView: View {
     }
 
     private var activeAppID: String {
-        selectedApp?.id ?? downloadAppID.trimmingCharacters(in: .whitespacesAndNewlines)
+        searchFeature.selectedApp?.id ?? downloadAppID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var activeAppName: String {
-        if let selectedApp {
+        if let selectedApp = searchFeature.selectedApp {
             return selectedApp.name
         }
         return activeAppID.isEmpty ? String(localized: "未选择 App") : "App ID \(activeAppID)"
     }
 
     private var manualAppIDTrimmed: String {
-        manualAppID.trimmingCharacters(in: .whitespacesAndNewlines)
+        taskFeature.manualAppID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var manualVersionIDTrimmed: String {
-        manualVersionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        taskFeature.manualVersionID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var canDownloadManualVersion: Bool {
@@ -2518,7 +2455,7 @@ struct ContentView: View {
     }
 
     private var manualDownloadVariant: IPADownloadVariant {
-        IPADownloadVariant(removeAppStoreUpdateMetadata: manualNoUpdate)
+        IPADownloadVariant(removeAppStoreUpdateMetadata: taskFeature.manualNoUpdate)
     }
 
     private var manualDownloadJobID: String {
@@ -2532,15 +2469,15 @@ struct ContentView: View {
 
     private var manualDownloadedURL: URL? {
         if manualVersionIDTrimmed.isEmpty {
-            guard manualLatestDownloadedJobID == manualDownloadJobID,
-                  let path = manualLatestDownloadedPath,
+            guard taskFeature.manualLatestDownloadedJobID == manualDownloadJobID,
+                  let path = taskFeature.manualLatestDownloadedPath,
                   FileManager.default.fileExists(atPath: path) else {
                 return nil
             }
             return URL(fileURLWithPath: path)
         }
 
-        return downloadedItems.first(where: { item in
+        return libraryFeature.downloadedItems.first(where: { item in
             item.versionId == manualVersionIDTrimmed
                 && item.removesAppStoreUpdates == manualDownloadVariant.removesAppStoreUpdates
                 && (manualAppIDTrimmed.isEmpty || item.appId == manualAppIDTrimmed)
@@ -2555,17 +2492,7 @@ struct ContentView: View {
     }
 
     private var selectedAppLocalIcon: NSImage? {
-        selectedAppLocalIconPath.flatMap { versionIcons[$0] }
-    }
-
-    private func refreshGlassEffectDisplay() {
-        glassRefreshToken &+= 1
-        DispatchQueue.main.async {
-            glassRefreshToken &+= 1
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-            glassRefreshToken &+= 1
-        }
+        searchFeature.selectedAppLocalIconPath.flatMap { libraryFeature.versionIcons[$0] }
     }
 
     private var libraryWorkspace: some View {
@@ -2641,7 +2568,7 @@ struct ContentView: View {
                                 AppSearchTile(
                                     rank: index + 1,
                                     result: result,
-                                    isSelected: selectedApp?.id == result.id
+                                    isSelected: searchFeature.selectedApp?.id == result.id
                                 )
                             }
                             .buttonStyle(.plain)
@@ -2712,7 +2639,7 @@ struct ContentView: View {
                                 AppSidebarRow(
                                     rank: index + 1,
                                     result: result,
-                                    isSelected: selectedApp?.id == result.id
+                                    isSelected: searchFeature.selectedApp?.id == result.id
                                 )
                             }
                             .buttonStyle(StablePressButtonStyle())
@@ -2957,7 +2884,7 @@ struct ContentView: View {
                         centeredSpinner
                     } else if catalog.versionResults.isEmpty {
                         VStack(spacing: 14) {
-                            if appleVersionFetchNeedsAcquisition {
+                            if versionFeature.appleVersionFetchNeedsAcquisition {
                                 largeEmptyState(
                                     systemImage: "app.badge",
                                     title: String(localized: "需要获取 App"),
@@ -3003,7 +2930,7 @@ struct ContentView: View {
                                         VersionSelectionRow(
                                             record: record,
                                             rowIndex: index,
-                                            isSelected: selectedVersionIDs.contains(record.id),
+                                            isSelected: versionFeature.selectedVersionIDs.contains(record.id),
                                             removesAppStoreUpdates: removesUpdates,
                                             isDownloading: downloads.isRunning(jobID),
                                             downloadProgress: downloads.job(jobID)?.progress,
@@ -3011,7 +2938,7 @@ struct ContentView: View {
                                             hasError: downloads.job(jobID)?.status == .failed,
                                             errorLog: downloads.job(jobID)?.log ?? "",
                                             downloadedURL: downloadedURL,
-                                            appIcon: downloadedURL.flatMap { versionIcons[$0.path] },
+                                            appIcon: downloadedURL.flatMap { libraryFeature.versionIcons[$0.path] },
                                             onSelect: {
                                                 handleVersionRowSelection(record)
                                             },
@@ -3088,9 +3015,9 @@ struct ContentView: View {
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
 
-                    manualMetadataTextField(String(localized: "App ID"), text: $manualAppID, field: .manualAppID)
+                    manualMetadataTextField(String(localized: "App ID"), text: $taskFeature.manualAppID, field: .manualAppID)
 
-                    manualMetadataTextField(String(localized: "版本 ID"), text: $manualVersionID, field: .manualVersionID)
+                    manualMetadataTextField(String(localized: "版本 ID"), text: $taskFeature.manualVersionID, field: .manualVersionID)
                 }
                 .frame(width: leadingWidth, alignment: .leading)
 
@@ -3164,8 +3091,9 @@ struct ContentView: View {
     }
 
     private var manualNoUpdateControl: some View {
-        Toggle("", isOn: $manualNoUpdate)
+        Toggle("", isOn: $taskFeature.manualNoUpdate)
             .labelsHidden()
+            .accessibilityLabel(String(localized: "不再更新"))
             .toggleStyle(.switch)
             .controlSize(.small)
             .fixedSize()
@@ -3208,9 +3136,9 @@ struct ContentView: View {
                 onDelete: {
                     if let url = manualDownloadedURL {
                         deleteDownloaded(url)
-                        if manualLatestDownloadedPath == url.path {
-                            manualLatestDownloadedPath = nil
-                            manualLatestDownloadedJobID = nil
+                        if taskFeature.manualLatestDownloadedPath == url.path {
+                            taskFeature.manualLatestDownloadedPath = nil
+                            taskFeature.manualLatestDownloadedJobID = nil
                         }
                     }
                 }
@@ -3292,11 +3220,11 @@ struct ContentView: View {
     @ViewBuilder
     private func selectedAppHeaderIcon(size: CGFloat) -> some View {
         let cornerRadius = activeAppIsVision ? size * 0.5 : size * 0.25
-        if let selectedApp, !selectedApp.artworkUrl.isEmpty {
+        if let selectedApp = searchFeature.selectedApp, !selectedApp.artworkUrl.isEmpty {
             CachedRemoteAppIcon(urlString: selectedApp.artworkUrl,
                                 size: size,
                                 cornerRadius: cornerRadius,
-                                cache: $remoteAppIcons)
+                                cache: $searchFeature.remoteAppIcons)
                 .shadow(color: appHeaderIconShadow, radius: 4, x: 0, y: 2)
         } else if let image = selectedAppLocalIcon {
             Image(nsImage: image)
@@ -3340,12 +3268,12 @@ struct ContentView: View {
         withAnimation(.snappy(duration: 0.18)) {
             catalog.historyProvider = provider
         }
-        appleVersionFetchNeedsAcquisition = false
+        versionFeature.appleVersionFetchNeedsAcquisition = false
         guard !activeAppID.isEmpty else { return }
         if activeAppIsVision && provider != "apple" {
-            selectedVersion = nil
-            selectedVersionIDs.removeAll()
-            lastSelectedVersionID = nil
+            versionFeature.selectedVersion = nil
+            versionFeature.selectedVersionIDs.removeAll()
+            versionFeature.lastSelectedVersionID = nil
             catalog.selectedVersionID = nil
             catalog.versionResults = []
             catalog.versionStatus = String(localized: "Apple Vision Pro 的 App 历史版本目前仅在 Apple 来源提供，其他来源并未收录。")
@@ -3566,7 +3494,7 @@ struct ContentView: View {
                                 VersionSelectionRow(
                                     record: record,
                                     rowIndex: index,
-                                    isSelected: selectedVersionIDs.contains(record.id),
+                                    isSelected: versionFeature.selectedVersionIDs.contains(record.id),
                                     removesAppStoreUpdates: removesUpdates,
                                     isDownloading: downloads.isRunning(jobID),
                                     downloadProgress: downloads.job(jobID)?.progress,
@@ -3574,7 +3502,7 @@ struct ContentView: View {
                                     hasError: downloads.job(jobID)?.status == .failed,
                                     errorLog: downloads.job(jobID)?.log ?? "",
                                     downloadedURL: downloadedURL,
-                                    appIcon: downloadedURL.flatMap { versionIcons[$0.path] },
+                                    appIcon: downloadedURL.flatMap { libraryFeature.versionIcons[$0.path] },
                                     onSelect: {
                                         handleVersionRowSelection(record)
                                     },
@@ -3630,7 +3558,7 @@ struct ContentView: View {
     }
 
     private var downloadedLibraryItems: [DownloadedItem] {
-        downloadedItems.sorted {
+        libraryFeature.downloadedItems.sorted {
             if $0.downloadDate != $1.downloadDate {
                 return $0.downloadDate > $1.downloadDate
             }
@@ -3639,7 +3567,7 @@ struct ContentView: View {
     }
 
     private var selectedDownloadedGroup: DownloadedAppGroup? {
-        if let selectedDownloadedGroupID,
+        if let selectedDownloadedGroupID = libraryFeature.selectedDownloadedGroupID,
            let group = filteredDownloadedAppGroups.first(where: { $0.id == selectedDownloadedGroupID }) {
             return group
         }
@@ -3647,7 +3575,7 @@ struct ContentView: View {
     }
 
     private func firstSelectedDownloadedGroupID() -> String? {
-        filteredDownloadedAppGroups.first { selectedDownloadedGroupIDs.contains($0.id) }?.id
+        filteredDownloadedAppGroups.first { libraryFeature.selectedDownloadedGroupIDs.contains($0.id) }?.id
     }
 
     private var downloadLibrarySidebar: some View {
@@ -3666,9 +3594,9 @@ struct ContentView: View {
                             } label: {
                                 DownloadedAppSidebarRow(
                                     group: group,
-                                    icon: versionIcons[group.iconPath],
-                                    isSelected: selectedDownloadedGroupIDs.contains(group.id),
-                                    remoteIconCache: $remoteAppIcons
+                                    icon: libraryFeature.versionIcons[group.iconPath],
+                                    isSelected: libraryFeature.selectedDownloadedGroupIDs.contains(group.id),
+                                    remoteIconCache: $searchFeature.remoteAppIcons
                                 )
                             }
                             .buttonStyle(StablePressButtonStyle())
@@ -3733,15 +3661,15 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 18, height: 18)
 
-            TextField(String(localized: "搜索 App"), text: $downloadSearchQuery)
+            TextField(String(localized: "搜索 App"), text: $libraryFeature.downloadSearchQuery)
                 .textFieldStyle(.plain)
                 .font(.callout)
                 .lineLimit(1)
                 .padding(.leading, 8)
 
-            if !downloadSearchQuery.isEmpty {
+            if !libraryFeature.downloadSearchQuery.isEmpty {
                 Button {
-                    downloadSearchQuery = ""
+                    libraryFeature.downloadSearchQuery = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 14, weight: .semibold))
@@ -3753,7 +3681,7 @@ struct ContentView: View {
             }
         }
         .padding(.leading, 12)
-        .padding(.trailing, downloadSearchQuery.isEmpty ? 16 : 11)
+        .padding(.trailing, libraryFeature.downloadSearchQuery.isEmpty ? 16 : 11)
         .frame(height: 42)
         .frame(maxWidth: .infinity)
         .contentShape(Capsule())
@@ -3778,10 +3706,10 @@ struct ContentView: View {
                             ForEach(Array(group.items.enumerated()), id: \.element.id) { index, item in
                                 DownloadedVersionHistoryRow(
                                     item: item,
-                                    icon: versionIcons[item.id],
+                                    icon: libraryFeature.versionIcons[item.id],
                                     rowIndex: index,
-                                    isSelected: selectedDownloadedItemIDs.contains(item.id),
-                                    remoteIconCache: $remoteAppIcons,
+                                    isSelected: libraryFeature.selectedDownloadedItemIDs.contains(item.id),
+                                    remoteIconCache: $searchFeature.remoteAppIcons,
                                     onSelect: {
                                         handleDownloadedRowSelection(item)
                                     },
@@ -3955,8 +3883,8 @@ struct ContentView: View {
                         .font(.title2.weight(.semibold))
                 }
                 Spacer()
-                if !downloadedItems.isEmpty {
-                    Text(String(localized: "\(downloadedAppGroups.count) 个 App · \(downloadedItems.count) 个文件"))
+                if !libraryFeature.downloadedItems.isEmpty {
+                    Text(String(localized: "\(downloadedAppGroups.count) 个 App · \(libraryFeature.downloadedItems.count) 个文件"))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -4017,7 +3945,7 @@ struct ContentView: View {
 
     private func downloadedAppCard(_ group: DownloadedAppGroup) -> some View {
         let isMulti = group.items.count > 1
-        let isExpanded = expandedGroups.contains(group.id)
+        let isExpanded = libraryFeature.expandedGroups.contains(group.id)
         let visibleItems = (isMulti && !isExpanded) ? Array(group.items.prefix(1)) : group.items
         return VStack(spacing: 0) {
             HStack(spacing: 13) {
@@ -4045,7 +3973,7 @@ struct ContentView: View {
                 if isMulti {
                     Button {
                         withAnimation(.snappy(duration: 0.24)) {
-                            if isExpanded { expandedGroups.remove(group.id) } else { expandedGroups.insert(group.id) }
+                            if isExpanded { libraryFeature.expandedGroups.remove(group.id) } else { libraryFeature.expandedGroups.insert(group.id) }
                         }
                     } label: {
                         HStack(spacing: 6) {
@@ -4114,7 +4042,7 @@ struct ContentView: View {
     private func downloadedAppIcon(path: String, size: CGFloat, artworkUrl: String = "", isVisionApp: Bool = false) -> some View {
         let cornerRadius = isVisionApp ? size * 0.5 : size * 0.25
         Group {
-            if let icon = versionIcons[path] {
+            if let icon = libraryFeature.versionIcons[path] {
                 Image(nsImage: icon)
                     .resizable()
                     .interpolation(.high)
@@ -4123,7 +4051,7 @@ struct ContentView: View {
                     urlString: artworkUrl,
                     size: size,
                     cornerRadius: cornerRadius,
-                    cache: $remoteAppIcons
+                    cache: $searchFeature.remoteAppIcons
                 )
             } else {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -4308,7 +4236,7 @@ struct ContentView: View {
             }
             .controlSize(.large)
             .buttonStyle(.glassProminent)
-            .disabled((selectedDownloadJobID().map { downloads.isRunning($0) } ?? false) || activeAppID.isEmpty || selectedVersion == nil)
+            .disabled((selectedDownloadJobID().map { downloads.isRunning($0) } ?? false) || activeAppID.isEmpty || versionFeature.selectedVersion == nil)
         case .logs:
             Button {
                 downloads.clearFinished()
@@ -4677,8 +4605,8 @@ struct ContentView: View {
     }
 
     private func loadSavedValuesOnce() {
-        guard !didLoadCredentials else { return }
-        didLoadCredentials = true
+        guard !accountFeature.didLoadCredentials else { return }
+        accountFeature.didLoadCredentials = true
 
         if downloadDir.isEmpty {
             downloadDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path ?? NSHomeDirectory()
@@ -4686,9 +4614,9 @@ struct ContentView: View {
 
         downloadAppID = ""
         downloadVersionID = ""
-        manualAppID = ""
-        manualVersionID = ""
-        manualNoUpdate = false
+        taskFeature.manualAppID = ""
+        taskFeature.manualVersionID = ""
+        taskFeature.manualNoUpdate = false
         catalog.historyAppID = ""
         catalog.platform = AppSearchPlatform.named(selectedSearchPlatformID).rawValue
         if AppSearchPlatform.named(selectedSearchPlatformID) == .vision {
@@ -4698,11 +4626,6 @@ struct ContentView: View {
         accountStore.load()
         let initialCountry = accountStore.selectedAccount?.countryCode ?? selectedCountryCode
         applyStorefrontCountry(initialCountry, reload: false)
-        if accountStore.reloginRequestID != nil {
-            DispatchQueue.main.async {
-                showSettings()
-            }
-        }
 
         if catalog.searchResults.isEmpty && catalog.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             catalog.loadFeatured()
@@ -4715,7 +4638,7 @@ struct ContentView: View {
     }
 
     private var activeAppIsVision: Bool {
-        selectedApp?.isVisionApp == true
+        searchFeature.selectedApp?.isVisionApp == true
     }
 
     private var visionHistoryNeedsAppleSource: Bool {
@@ -4743,17 +4666,17 @@ struct ContentView: View {
     }
 
     private func clearActiveAppSelectionForPlatformChange() {
-        selectedApp = nil
-        selectedAppLocalIconPath = nil
-        selectedVersion = nil
-        selectedVersionIDs.removeAll()
-        lastSelectedVersionID = nil
-        appleVersionFetchNeedsAcquisition = false
+        searchFeature.selectedApp = nil
+        searchFeature.selectedAppLocalIconPath = nil
+        versionFeature.selectedVersion = nil
+        versionFeature.selectedVersionIDs.removeAll()
+        versionFeature.lastSelectedVersionID = nil
+        versionFeature.appleVersionFetchNeedsAcquisition = false
         downloadAppID = ""
         downloadVersionID = ""
-        manualAppID = ""
-        manualVersionID = ""
-        manualNoUpdate = false
+        taskFeature.manualAppID = ""
+        taskFeature.manualVersionID = ""
+        taskFeature.manualNoUpdate = false
         catalog.historyAppID = ""
         catalog.selectedSearchID = nil
         catalog.selectedVersionID = nil
@@ -4801,25 +4724,25 @@ struct ContentView: View {
 
     private func prepareVersionsFromDownload() {
         catalog.historyAppID = downloadAppID.trimmingCharacters(in: .whitespacesAndNewlines)
-        selectedVersion = nil
-        selectedVersionIDs.removeAll()
-        lastSelectedVersionID = nil
+        versionFeature.selectedVersion = nil
+        versionFeature.selectedVersionIDs.removeAll()
+        versionFeature.lastSelectedVersionID = nil
         rightPanel = .search
         loadHistoryForActiveApp()
     }
 
     private func selectApp(_ result: AppSearchResult) {
-        selectedApp = result
-        selectedAppLocalIconPath = nil
-        selectedVersion = nil
-        selectedVersionIDs.removeAll()
-        lastSelectedVersionID = nil
-        appleVersionFetchNeedsAcquisition = false
+        searchFeature.selectedApp = result
+        searchFeature.selectedAppLocalIconPath = nil
+        versionFeature.selectedVersion = nil
+        versionFeature.selectedVersionIDs.removeAll()
+        versionFeature.lastSelectedVersionID = nil
+        versionFeature.appleVersionFetchNeedsAcquisition = false
         downloadAppID = result.id
         downloadVersionID = ""
-        manualAppID = result.id
-        manualVersionID = ""
-        manualNoUpdate = false
+        taskFeature.manualAppID = result.id
+        taskFeature.manualVersionID = ""
+        taskFeature.manualNoUpdate = false
         catalog.historyAppID = result.id
         rightPanel = .search
         if result.isVisionApp || selectedSearchPlatform == .vision {
@@ -4832,12 +4755,12 @@ struct ContentView: View {
 
     private func selectVersion(_ record: VersionRecord, updateSelection: Bool = true) {
         if updateSelection {
-            selectedVersionIDs = [record.id]
+            versionFeature.selectedVersionIDs = [record.id]
         }
-        lastSelectedVersionID = record.id
-        selectedVersion = record
+        versionFeature.lastSelectedVersionID = record.id
+        versionFeature.selectedVersion = record
         downloadVersionID = record.versionId
-        manualAppID = activeAppID
+        taskFeature.manualAppID = activeAppID
         catalog.selectedVersionID = record.id
         catalog.versionStatus = String(localized: "已选择 \(record.version)，版本 ID：\(record.versionId)。")
     }
@@ -4850,24 +4773,24 @@ struct ContentView: View {
         let shiftPressed = modifiers.contains(.shift)
 
         if shiftPressed,
-           let anchorID = lastSelectedVersionID,
+           let anchorID = versionFeature.lastSelectedVersionID,
            let anchorIndex = catalog.versionResults.firstIndex(where: { $0.id == anchorID }),
            let targetIndex = catalog.versionResults.firstIndex(where: { $0.id == record.id }) {
             let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
             let rangeIDs = Set(catalog.versionResults[bounds].map(\.id))
-            selectedVersionIDs = commandPressed ? selectedVersionIDs.union(rangeIDs) : rangeIDs
+            versionFeature.selectedVersionIDs = commandPressed ? versionFeature.selectedVersionIDs.union(rangeIDs) : rangeIDs
             selectVersion(record, updateSelection: false)
             return
         }
 
         if commandPressed {
-            if selectedVersionIDs.contains(record.id) {
-                selectedVersionIDs.remove(record.id)
-                if selectedVersion?.id == record.id {
+            if versionFeature.selectedVersionIDs.contains(record.id) {
+                versionFeature.selectedVersionIDs.remove(record.id)
+                if versionFeature.selectedVersion?.id == record.id {
                     selectFallbackVersionAfterDeselection()
                 }
             } else {
-                selectedVersionIDs.insert(record.id)
+                versionFeature.selectedVersionIDs.insert(record.id)
                 selectVersion(record, updateSelection: false)
             }
         } else {
@@ -4876,11 +4799,11 @@ struct ContentView: View {
     }
 
     private func selectFallbackVersionAfterDeselection() {
-        guard let fallback = catalog.versionResults.first(where: { selectedVersionIDs.contains($0.id) }) else {
-            selectedVersion = nil
+        guard let fallback = catalog.versionResults.first(where: { versionFeature.selectedVersionIDs.contains($0.id) }) else {
+            versionFeature.selectedVersion = nil
             downloadVersionID = ""
             catalog.selectedVersionID = nil
-            lastSelectedVersionID = nil
+            versionFeature.lastSelectedVersionID = nil
             return
         }
         selectVersion(fallback, updateSelection: false)
@@ -4892,7 +4815,7 @@ struct ContentView: View {
     }
 
     private func downloadSelectedVersions() {
-        let records = catalog.versionResults.filter { selectedVersionIDs.contains($0.id) }
+        let records = catalog.versionResults.filter { versionFeature.selectedVersionIDs.contains($0.id) }
         guard !records.isEmpty else { return }
         for record in records {
             let removesUpdates = noUpdateEnabled(for: record)
@@ -4904,7 +4827,7 @@ struct ContentView: View {
     }
 
     private func showsBatchDownloadMenu(for record: VersionRecord) -> Bool {
-        selectedVersionIDs.count > 1 && selectedVersionIDs.contains(record.id)
+        versionFeature.selectedVersionIDs.count > 1 && versionFeature.selectedVersionIDs.contains(record.id)
     }
 
     private func handleSelectAllShortcut() {
@@ -4912,7 +4835,7 @@ struct ContentView: View {
         case .search, .versions:
             selectAllVersionRows()
         case .download:
-            switch downloadSelectionScope {
+            switch libraryFeature.downloadSelectionScope {
             case .appGroups:
                 selectAllDownloadedGroupRows()
             case .versions:
@@ -4942,7 +4865,7 @@ struct ContentView: View {
 
     private func selectAllVersionRows() {
         guard !catalog.versionResults.isEmpty else { return }
-        selectedVersionIDs = Set(catalog.versionResults.map(\.id))
+        versionFeature.selectedVersionIDs = Set(catalog.versionResults.map(\.id))
         if let first = catalog.versionResults.first {
             selectVersion(first, updateSelection: false)
         }
@@ -4950,37 +4873,37 @@ struct ContentView: View {
 
     private func selectAllDownloadedRows() {
         guard let group = selectedDownloadedGroup, !group.items.isEmpty else { return }
-        downloadSelectionScope = .versions
-        selectedDownloadedItemIDs = Set(group.items.map(\.id))
-        selectedDownloadedItemID = group.items.first?.id
-        lastSelectedDownloadedItemID = selectedDownloadedItemID
+        libraryFeature.downloadSelectionScope = .versions
+        libraryFeature.selectedDownloadedItemIDs = Set(group.items.map(\.id))
+        libraryFeature.selectedDownloadedItemID = group.items.first?.id
+        libraryFeature.lastSelectedDownloadedItemID = libraryFeature.selectedDownloadedItemID
     }
 
     private func selectAllDownloadedGroupRows() {
         guard !filteredDownloadedAppGroups.isEmpty else { return }
-        downloadSelectionScope = .appGroups
-        selectedDownloadedGroupIDs = Set(filteredDownloadedAppGroups.map(\.id))
+        libraryFeature.downloadSelectionScope = .appGroups
+        libraryFeature.selectedDownloadedGroupIDs = Set(filteredDownloadedAppGroups.map(\.id))
         if let first = filteredDownloadedAppGroups.first {
-            selectedDownloadedGroupID = first.id
-            lastSelectedDownloadedGroupID = first.id
+            libraryFeature.selectedDownloadedGroupID = first.id
+            libraryFeature.lastSelectedDownloadedGroupID = first.id
         }
-        selectedDownloadedItemID = nil
-        selectedDownloadedItemIDs.removeAll()
-        lastSelectedDownloadedItemID = nil
+        libraryFeature.selectedDownloadedItemID = nil
+        libraryFeature.selectedDownloadedItemIDs.removeAll()
+        libraryFeature.lastSelectedDownloadedItemID = nil
     }
 
     private func handleDownloadedGroupSelection(_ group: DownloadedAppGroup) {
         activeField = nil
         KeyboardShortcutState.shared.isTextEditing = false
-        downloadSelectionScope = .appGroups
-        selectedDownloadedItemID = nil
-        selectedDownloadedItemIDs.removeAll()
-        lastSelectedDownloadedItemID = nil
+        libraryFeature.downloadSelectionScope = .appGroups
+        libraryFeature.selectedDownloadedItemID = nil
+        libraryFeature.selectedDownloadedItemIDs.removeAll()
+        libraryFeature.lastSelectedDownloadedItemID = nil
         if !group.appId.isEmpty {
-            manualAppID = group.appId
-            manualVersionID = ""
-            manualLatestDownloadedPath = nil
-            manualLatestDownloadedJobID = nil
+            taskFeature.manualAppID = group.appId
+            taskFeature.manualVersionID = ""
+            taskFeature.manualLatestDownloadedPath = nil
+            taskFeature.manualLatestDownloadedJobID = nil
         }
 
         let modifiers = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -4988,96 +4911,96 @@ struct ContentView: View {
         let shiftPressed = modifiers.contains(.shift)
 
         if shiftPressed,
-           let anchorID = lastSelectedDownloadedGroupID,
+           let anchorID = libraryFeature.lastSelectedDownloadedGroupID,
            let anchorIndex = filteredDownloadedAppGroups.firstIndex(where: { $0.id == anchorID }),
            let targetIndex = filteredDownloadedAppGroups.firstIndex(where: { $0.id == group.id }) {
             let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
             let rangeIDs = Set(filteredDownloadedAppGroups[bounds].map(\.id))
-            selectedDownloadedGroupIDs = commandPressed ? selectedDownloadedGroupIDs.union(rangeIDs) : rangeIDs
-            selectedDownloadedGroupID = group.id
+            libraryFeature.selectedDownloadedGroupIDs = commandPressed ? libraryFeature.selectedDownloadedGroupIDs.union(rangeIDs) : rangeIDs
+            libraryFeature.selectedDownloadedGroupID = group.id
             return
         }
 
         if commandPressed {
-            if selectedDownloadedGroupIDs.contains(group.id) {
-                selectedDownloadedGroupIDs.remove(group.id)
-                if selectedDownloadedGroupID == group.id {
-                    selectedDownloadedGroupID = firstSelectedDownloadedGroupID()
+            if libraryFeature.selectedDownloadedGroupIDs.contains(group.id) {
+                libraryFeature.selectedDownloadedGroupIDs.remove(group.id)
+                if libraryFeature.selectedDownloadedGroupID == group.id {
+                    libraryFeature.selectedDownloadedGroupID = firstSelectedDownloadedGroupID()
                 }
-                if selectedDownloadedGroupIDs.isEmpty {
-                    selectedDownloadedGroupID = nil
-                    lastSelectedDownloadedGroupID = nil
+                if libraryFeature.selectedDownloadedGroupIDs.isEmpty {
+                    libraryFeature.selectedDownloadedGroupID = nil
+                    libraryFeature.lastSelectedDownloadedGroupID = nil
                 }
             } else {
-                selectedDownloadedGroupIDs.insert(group.id)
-                selectedDownloadedGroupID = group.id
-                lastSelectedDownloadedGroupID = group.id
+                libraryFeature.selectedDownloadedGroupIDs.insert(group.id)
+                libraryFeature.selectedDownloadedGroupID = group.id
+                libraryFeature.lastSelectedDownloadedGroupID = group.id
             }
         } else {
-            selectedDownloadedGroupIDs = [group.id]
-            selectedDownloadedGroupID = group.id
-            lastSelectedDownloadedGroupID = group.id
+            libraryFeature.selectedDownloadedGroupIDs = [group.id]
+            libraryFeature.selectedDownloadedGroupID = group.id
+            libraryFeature.lastSelectedDownloadedGroupID = group.id
         }
     }
 
     private func handleDownloadedRowSelection(_ item: DownloadedItem) {
         activeField = nil
         KeyboardShortcutState.shared.isTextEditing = false
-        downloadSelectionScope = .versions
+        libraryFeature.downloadSelectionScope = .versions
         let modifiers = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let commandPressed = modifiers.contains(.command)
         let shiftPressed = modifiers.contains(.shift)
 
         if shiftPressed,
-           let anchorID = lastSelectedDownloadedItemID,
+           let anchorID = libraryFeature.lastSelectedDownloadedItemID,
            let items = selectedDownloadedGroup?.items,
            let anchorIndex = items.firstIndex(where: { $0.id == anchorID }),
            let targetIndex = items.firstIndex(where: { $0.id == item.id }) {
             let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
             let rangeIDs = Set(items[bounds].map(\.id))
-            selectedDownloadedItemIDs = commandPressed ? selectedDownloadedItemIDs.union(rangeIDs) : rangeIDs
-            selectedDownloadedItemID = item.id
+            libraryFeature.selectedDownloadedItemIDs = commandPressed ? libraryFeature.selectedDownloadedItemIDs.union(rangeIDs) : rangeIDs
+            libraryFeature.selectedDownloadedItemID = item.id
             return
         }
 
         if commandPressed {
-            if selectedDownloadedItemIDs.contains(item.id) {
-                selectedDownloadedItemIDs.remove(item.id)
-                if selectedDownloadedItemID == item.id {
-                    selectedDownloadedItemID = selectedDownloadedItemIDs.first
+            if libraryFeature.selectedDownloadedItemIDs.contains(item.id) {
+                libraryFeature.selectedDownloadedItemIDs.remove(item.id)
+                if libraryFeature.selectedDownloadedItemID == item.id {
+                    libraryFeature.selectedDownloadedItemID = libraryFeature.selectedDownloadedItemIDs.first
                 }
             } else {
-                selectedDownloadedItemIDs.insert(item.id)
-                selectedDownloadedItemID = item.id
-                lastSelectedDownloadedItemID = item.id
+                libraryFeature.selectedDownloadedItemIDs.insert(item.id)
+                libraryFeature.selectedDownloadedItemID = item.id
+                libraryFeature.lastSelectedDownloadedItemID = item.id
             }
         } else {
-            selectedDownloadedItemIDs = [item.id]
-            selectedDownloadedItemID = item.id
-            lastSelectedDownloadedItemID = item.id
+            libraryFeature.selectedDownloadedItemIDs = [item.id]
+            libraryFeature.selectedDownloadedItemID = item.id
+            libraryFeature.lastSelectedDownloadedItemID = item.id
         }
     }
 
     private func showsBatchDeleteMenu(for item: DownloadedItem) -> Bool {
-        selectedDownloadedItemIDs.count > 1 && selectedDownloadedItemIDs.contains(item.id)
+        libraryFeature.selectedDownloadedItemIDs.count > 1 && libraryFeature.selectedDownloadedItemIDs.contains(item.id)
     }
 
     private func showsBatchDeleteMenu(for group: DownloadedAppGroup) -> Bool {
-        selectedDownloadedGroupIDs.count > 1 && selectedDownloadedGroupIDs.contains(group.id)
+        libraryFeature.selectedDownloadedGroupIDs.count > 1 && libraryFeature.selectedDownloadedGroupIDs.contains(group.id)
     }
 
     private func deleteSelectedDownloadedItems() {
-        guard !selectedDownloadedItemIDs.isEmpty else { return }
-        let urls = downloadedItems
-            .filter { selectedDownloadedItemIDs.contains($0.id) }
+        guard !libraryFeature.selectedDownloadedItemIDs.isEmpty else { return }
+        let urls = libraryFeature.downloadedItems
+            .filter { libraryFeature.selectedDownloadedItemIDs.contains($0.id) }
             .map(\.fileURL)
 
         for url in urls {
             try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
         }
-        selectedDownloadedItemIDs.removeAll()
-        selectedDownloadedItemID = nil
-        lastSelectedDownloadedItemID = nil
+        libraryFeature.selectedDownloadedItemIDs.removeAll()
+        libraryFeature.selectedDownloadedItemID = nil
+        libraryFeature.lastSelectedDownloadedItemID = nil
         refreshDownloadedFiles()
     }
 
@@ -5086,14 +5009,14 @@ struct ContentView: View {
     }
 
     private func deleteSelectedDownloadedGroups() {
-        guard !selectedDownloadedGroupIDs.isEmpty else { return }
-        deleteDownloadedGroups(withIDs: selectedDownloadedGroupIDs)
+        guard !libraryFeature.selectedDownloadedGroupIDs.isEmpty else { return }
+        deleteDownloadedGroups(withIDs: libraryFeature.selectedDownloadedGroupIDs)
     }
 
     private func deleteDownloadedGroups(withIDs groupIDs: Set<String>) {
         guard !groupIDs.isEmpty else { return }
         let fallbackGroupID = filteredDownloadedAppGroups.first { !groupIDs.contains($0.id) }?.id
-        let urls = downloadedItems
+        let urls = libraryFeature.downloadedItems
             .filter { groupIDs.contains($0.groupKey) }
             .map(\.fileURL)
 
@@ -5101,27 +5024,27 @@ struct ContentView: View {
             try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
         }
 
-        selectedDownloadedGroupIDs.subtract(groupIDs)
-        if selectedDownloadedGroupIDs.isEmpty, let fallbackGroupID {
-            selectedDownloadedGroupIDs = [fallbackGroupID]
-            selectedDownloadedGroupID = fallbackGroupID
-            lastSelectedDownloadedGroupID = fallbackGroupID
-        } else if let selectedDownloadedGroupID, groupIDs.contains(selectedDownloadedGroupID) {
-            self.selectedDownloadedGroupID = firstSelectedDownloadedGroupID()
+        libraryFeature.selectedDownloadedGroupIDs.subtract(groupIDs)
+        if libraryFeature.selectedDownloadedGroupIDs.isEmpty, let fallbackGroupID {
+            libraryFeature.selectedDownloadedGroupIDs = [fallbackGroupID]
+            libraryFeature.selectedDownloadedGroupID = fallbackGroupID
+            libraryFeature.lastSelectedDownloadedGroupID = fallbackGroupID
+        } else if let selectedDownloadedGroupID = libraryFeature.selectedDownloadedGroupID, groupIDs.contains(selectedDownloadedGroupID) {
+            self.libraryFeature.selectedDownloadedGroupID = firstSelectedDownloadedGroupID()
         }
-        if let lastSelectedDownloadedGroupID, groupIDs.contains(lastSelectedDownloadedGroupID) {
-            self.lastSelectedDownloadedGroupID = firstSelectedDownloadedGroupID()
+        if let lastSelectedDownloadedGroupID = libraryFeature.lastSelectedDownloadedGroupID, groupIDs.contains(lastSelectedDownloadedGroupID) {
+            self.libraryFeature.lastSelectedDownloadedGroupID = firstSelectedDownloadedGroupID()
         }
-        selectedDownloadedItemID = nil
-        selectedDownloadedItemIDs.removeAll()
-        lastSelectedDownloadedItemID = nil
-        downloadSelectionScope = .appGroups
+        libraryFeature.selectedDownloadedItemID = nil
+        libraryFeature.selectedDownloadedItemIDs.removeAll()
+        libraryFeature.lastSelectedDownloadedItemID = nil
+        libraryFeature.downloadSelectionScope = .appGroups
         refreshDownloadedFiles()
     }
 
     private static let versionIDsFetchJobKey = "__ipa_versionids_fetch__"
 
-    private static func filenameVersionAndVariant(from stem: String) -> (name: String, version: String, variant: IPADownloadVariant) {
+    private nonisolated static func filenameVersionAndVariant(from stem: String) -> (name: String, version: String, variant: IPADownloadVariant) {
         let suffix = "_no-update"
         let variant: IPADownloadVariant
         let baseStem: String
@@ -5144,7 +5067,7 @@ struct ContentView: View {
 
     private func fetchVersionIDsFromApple(allowAppAcquisition: Bool = false) {
         guard let account = accountStore.selectedAccount else {
-            saveMessage = String(localized: "请先登录 Apple 账户。")
+            accountFeature.saveMessage = String(localized: "请先登录 Apple 账户。")
             showSettings()
             return
         }
@@ -5153,33 +5076,36 @@ struct ContentView: View {
         do {
             pwd = try accountStore.password(for: account)
         } catch {
-            saveMessage = error.localizedDescription
+            accountFeature.saveMessage = error.localizedDescription
             return
         }
         let appID = activeAppID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !acct.isEmpty, !pwd.isEmpty else {
-            saveMessage = String(localized: "请先登录 Apple 账户。"); showSettings(); return
+            accountFeature.saveMessage = String(localized: "请先登录 Apple 账户。"); showSettings(); return
         }
         guard !appID.isEmpty else { return }
-        selectedVersion = nil
-        selectedVersionIDs.removeAll()
-        lastSelectedVersionID = nil
+        versionFeature.selectedVersion = nil
+        versionFeature.selectedVersionIDs.removeAll()
+        versionFeature.lastSelectedVersionID = nil
         catalog.selectedVersionID = nil
         catalog.versionResults = []
-        appleVersionFetchNeedsAcquisition = false
+        versionFeature.appleVersionFetchNeedsAcquisition = false
         catalog.versionStatus = String(localized: "正在从 Apple 获取版本…")
+        let accountCountry = account.countryCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let priceFlag = accountCountry.caseInsensitiveCompare(selectedCountryCode) == .orderedSame ? appIsFreeFlag() : ""
         let config = RunConfig(appleAccount: acct, password: pwd, code: "",
                                appID: appID, versionID: "", downloadDir: "", listVersionIDs: true,
-                               appIsFree: appIsFreeFlag(), appCountry: selectedCountryCode,
+                               appIsFree: priceFlag, appCountry: accountCountry.isEmpty ? selectedCountryCode : accountCountry,
                                allowAppAcquisition: allowAppAcquisition)
         downloads.start(id: Self.versionIDsFetchJobKey, label: String(localized: "获取版本列表"), config: config)
     }
 
     private func appIsFreeFlag() -> String {
-        guard let app = selectedApp, app.id == activeAppID else { return "" }
+        guard let app = searchFeature.selectedApp, app.id == activeAppID else { return "" }
         let price = app.price.trimmingCharacters(in: .whitespacesAndNewlines)
         if price.isEmpty { return "" }
-        return price.contains(where: { $0.isNumber }) ? "0" : "1"
+        let digits = price.compactMap(\.wholeNumberValue)
+        return digits.isEmpty || digits.allSatisfy { $0 == 0 } ? "1" : "0"
     }
 
     private func downloadManualVersionID() {
@@ -5189,22 +5115,22 @@ struct ContentView: View {
         let variant = manualDownloadVariant
         let jobID = manualDownloadJobID
         let startedAt = Date()
-        selectedVersion = nil
-        selectedVersionIDs.removeAll()
-        lastSelectedVersionID = nil
-        if selectedApp?.id != appID {
-            selectedApp = nil
-            selectedAppLocalIconPath = nil
+        versionFeature.selectedVersion = nil
+        versionFeature.selectedVersionIDs.removeAll()
+        versionFeature.lastSelectedVersionID = nil
+        if searchFeature.selectedApp?.id != appID {
+            searchFeature.selectedApp = nil
+            searchFeature.selectedAppLocalIconPath = nil
         }
         downloadAppID = appID
         downloadVersionID = vid
         catalog.historyAppID = appID
         catalog.selectedVersionID = nil
         if vid.isEmpty {
-            manualLatestDownloadedPath = nil
-            manualLatestDownloadedJobID = jobID
+            taskFeature.manualLatestDownloadedPath = nil
+            taskFeature.manualLatestDownloadedJobID = jobID
         }
-        start(removeAppStoreUpdateMetadataOverride: manualNoUpdate)
+        start(removeAppStoreUpdateMetadataOverride: taskFeature.manualNoUpdate)
         if vid.isEmpty {
             trackManualLatestDownload(jobID: jobID, appID: appID, variant: variant, startedAt: startedAt)
         }
@@ -5213,7 +5139,7 @@ struct ContentView: View {
     private func trackManualLatestDownload(jobID: String, appID: String, variant: IPADownloadVariant, startedAt: Date) {
         Task { @MainActor in
             for _ in 0..<1800 {
-                guard manualLatestDownloadedJobID == jobID else { return }
+                guard taskFeature.manualLatestDownloadedJobID == jobID else { return }
                 guard let job = downloads.job(jobID) else {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                     continue
@@ -5227,7 +5153,7 @@ struct ContentView: View {
                     for _ in 0..<30 {
                         refreshDownloadedFiles()
                         if let url = newestDownloadedURL(appID: appID, variant: variant, after: startedAt) {
-                            manualLatestDownloadedPath = url.path
+                            taskFeature.manualLatestDownloadedPath = url.path
                             return
                         }
                         try? await Task.sleep(nanoseconds: 180_000_000)
@@ -5247,45 +5173,47 @@ struct ContentView: View {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let ids = obj["versionIds"] as? [String] else {
             catalog.versionResults = []
-            selectedVersionIDs.removeAll()
-            lastSelectedVersionID = nil
-            if let errorLine = lines.last(where: { $0.contains("[X]") }) {
-                catalog.versionStatus = cleanDownloadErrorDetail(errorLine)
-                    ?? String(localized: "未能从 Apple 获取版本，请改用其他来源。")
-            } else {
-                catalog.versionStatus = String(localized: "未能从 Apple 获取版本，请改用其他来源。")
-            }
+            versionFeature.selectedVersionIDs.removeAll()
+            versionFeature.lastSelectedVersionID = nil
+            catalog.versionStatus = downloadErrorMessage(from: log)
             return
         }
         if (obj["requiresAcquisition"] as? Bool) == true {
             catalog.versionResults = []
-            selectedVersionIDs.removeAll()
-            lastSelectedVersionID = nil
-            appleVersionFetchNeedsAcquisition = true
+            versionFeature.selectedVersionIDs.removeAll()
+            versionFeature.lastSelectedVersionID = nil
+            versionFeature.appleVersionFetchNeedsAcquisition = true
             catalog.versionStatus = String(localized: "此 Apple 账户未拥有此 App，是否从 Apple 获取此 App？")
             return
         }
+        let latestVersionID = obj["latestVersionId"] as? String ?? ""
+        let latestVersion = obj["latestVersion"] as? String ?? ""
         let records = ids.reversed().map { id in
-            VersionRecord(id: "apple-\(id)", version: "—", versionId: id, date: "", size: "", source: "Apple")
+            let displayVersion = id == latestVersionID && !latestVersion.isEmpty ? latestVersion : "—"
+            return VersionRecord(id: "apple-\(id)", version: displayVersion, versionId: id, date: "", size: "", source: "Apple")
         }
-        appleVersionFetchNeedsAcquisition = false
-        selectedVersionIDs.removeAll()
-        lastSelectedVersionID = nil
+        versionFeature.appleVersionFetchNeedsAcquisition = false
+        versionFeature.selectedVersionIDs.removeAll()
+        versionFeature.lastSelectedVersionID = nil
         catalog.versionResults = records
-        catalog.versionStatus = String(localized: "已从 Apple 元数据获取 \(records.count) 个版本 ID。")
+        if (obj["fallbackCurrentOnly"] as? Bool) == true {
+            catalog.versionStatus = String(localized: "Apple 未返回历史记录，已从官方 App Store 页面获取当前版本。")
+        } else {
+            catalog.versionStatus = String(localized: "已从 Apple 元数据获取 \(records.count) 个版本 ID。")
+        }
     }
 
     private func refreshDownloadedFiles() {
         let dirPath = downloadDir.trimmingCharacters(in: .whitespacesAndNewlines)
-        downloadLibraryRefreshTask?.cancel()
+        libraryFeature.downloadLibraryRefreshTask?.cancel()
         guard !dirPath.isEmpty else {
-            downloadedFiles = [:]
-            downloadedItems = []
+            libraryFeature.downloadedFiles = [:]
+            libraryFeature.downloadedItems = []
             return
         }
 
         let dirURL = URL(fileURLWithPath: (dirPath as NSString).expandingTildeInPath, isDirectory: true)
-        downloadLibraryRefreshTask = Task { @MainActor in
+        libraryFeature.downloadLibraryRefreshTask = Task { @MainActor in
             do {
                 try await Task.sleep(nanoseconds: 180_000_000)
             } catch {
@@ -5307,46 +5235,46 @@ struct ContentView: View {
                   let snapshot
             else { return }
 
-            downloadedFiles = snapshot.filesByVersion
-            downloadedItems = snapshot.items
+            libraryFeature.downloadedFiles = snapshot.filesByVersion
+            libraryFeature.downloadedItems = snapshot.items
 
             let livePaths = Set(snapshot.filesByVersion.values.map(\.path))
-            versionIcons = versionIcons.filter { livePaths.contains($0.key) }
-            downloadedVersionIDs = downloadedVersionIDs.filter { livePaths.contains($0.value.path) }
-            iconPathsBeingLoaded.formIntersection(livePaths)
+            libraryFeature.versionIcons = libraryFeature.versionIcons.filter { livePaths.contains($0.key) }
+            libraryFeature.downloadedVersionIDs = libraryFeature.downloadedVersionIDs.filter { livePaths.contains($0.value.path) }
+            libraryFeature.iconPathsBeingLoaded.formIntersection(livePaths)
 
-            for url in snapshot.locallyAvailableURLs where versionIcons[url.path] == nil {
+            for url in snapshot.locallyAvailableURLs where libraryFeature.versionIcons[url.path] == nil {
                 loadAppIcon(from: url)
             }
 
             let validDownloadedIDs = Set(snapshot.items.map(\.id))
             let validDownloadedGroupIDs = Set(snapshot.items.map(\.groupKey))
-            selectedDownloadedItemIDs.formIntersection(validDownloadedIDs)
-            selectedDownloadedGroupIDs.formIntersection(validDownloadedGroupIDs)
-            if let selectedDownloadedItemID,
+            libraryFeature.selectedDownloadedItemIDs.formIntersection(validDownloadedIDs)
+            libraryFeature.selectedDownloadedGroupIDs.formIntersection(validDownloadedGroupIDs)
+            if let selectedDownloadedItemID = libraryFeature.selectedDownloadedItemID,
                !validDownloadedIDs.contains(selectedDownloadedItemID) {
-                self.selectedDownloadedItemID = nil
+                self.libraryFeature.selectedDownloadedItemID = nil
             }
-            if let lastSelectedDownloadedGroupID,
+            if let lastSelectedDownloadedGroupID = libraryFeature.lastSelectedDownloadedGroupID,
                !validDownloadedGroupIDs.contains(lastSelectedDownloadedGroupID) {
-                self.lastSelectedDownloadedGroupID = nil
+                self.libraryFeature.lastSelectedDownloadedGroupID = nil
             }
-            if let selectedDownloadedGroupID,
+            if let selectedDownloadedGroupID = libraryFeature.selectedDownloadedGroupID,
                !validDownloadedGroupIDs.contains(selectedDownloadedGroupID) {
-                self.selectedDownloadedGroupID = self.firstSelectedDownloadedGroupID()
-                selectedDownloadedItemIDs.removeAll()
-                lastSelectedDownloadedItemID = nil
+                self.libraryFeature.selectedDownloadedGroupID = self.firstSelectedDownloadedGroupID()
+                libraryFeature.selectedDownloadedItemIDs.removeAll()
+                libraryFeature.lastSelectedDownloadedItemID = nil
             }
         }
     }
 
-    private struct DownloadLibrarySnapshot {
+    private struct DownloadLibrarySnapshot: Sendable {
         let filesByVersion: [String: URL]
         let items: [DownloadedItem]
         let locallyAvailableURLs: [URL]
     }
 
-    private static func scanDownloadLibrary(at dirURL: URL) -> DownloadLibrarySnapshot? {
+    private nonisolated static func scanDownloadLibrary(at dirURL: URL) -> DownloadLibrarySnapshot? {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: dirURL,
             includingPropertiesForKeys: nil,
@@ -5384,7 +5312,7 @@ struct ContentView: View {
         )
     }
 
-    private static func extractDownloadedItem(fromIPA url: URL) -> DownloadedItem? {
+    private nonisolated static func extractDownloadedItem(fromIPA url: URL) -> DownloadedItem? {
         let path = url.path
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
@@ -5437,7 +5365,7 @@ struct ContentView: View {
     }
 
     private var downloadedAppGroups: [DownloadedAppGroup] {
-        let grouped = Dictionary(grouping: downloadedItems) { $0.groupKey }
+        let grouped = Dictionary(grouping: libraryFeature.downloadedItems) { $0.groupKey }
         return grouped.map { key, items in
             DownloadedAppGroup(id: key, items: items.sorted { $0.downloadDate > $1.downloadDate })
         }
@@ -5445,7 +5373,7 @@ struct ContentView: View {
     }
 
     private var filteredDownloadedAppGroups: [DownloadedAppGroup] {
-        let query = downloadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = libraryFeature.downloadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return downloadedAppGroups }
 
         return downloadedAppGroups.filter { group in
@@ -5485,23 +5413,26 @@ struct ContentView: View {
     private func loadAppIcon(from ipaURL: URL) {
         let path = ipaURL.path
         guard Self.isFileMaterialized(at: path),
-              iconPathsBeingLoaded.insert(path).inserted
+              libraryFeature.iconPathsBeingLoaded.insert(path).inserted
         else { return }
 
-        DispatchQueue.global(qos: .utility).async {
-            let image = Self.extractAppIcon(fromIPA: path)
-            let metadata = Self.extractVersionMetadata(fromIPA: path)
-            DispatchQueue.main.async {
-                iconPathsBeingLoaded.remove(path)
-                if let image { versionIcons[path] = image }
-                if let versionID = metadata.versionID {
-                    downloadedVersionIDs[downloadedFileKey(versionID, variant: metadata.variant)] = ipaURL
-                }
+        Task { @MainActor in
+            let result = await Task.detached(priority: .utility) {
+                let iconData = Self.extractAppIconData(fromIPA: path)
+                let metadata = Self.extractVersionMetadata(fromIPA: path)
+                return (iconData, metadata)
+            }.value
+            libraryFeature.iconPathsBeingLoaded.remove(path)
+            if let iconData = result.0, let image = NSImage(data: iconData) {
+                libraryFeature.versionIcons[path] = image
+            }
+            if let versionID = result.1.versionID {
+                libraryFeature.downloadedVersionIDs[downloadedFileKey(versionID, variant: result.1.variant)] = ipaURL
             }
         }
     }
 
-    private static func extractVersionMetadata(fromIPA path: String) -> (versionID: String?, variant: IPADownloadVariant) {
+    private nonisolated static func extractVersionMetadata(fromIPA path: String) -> (versionID: String?, variant: IPADownloadVariant) {
         let metadataInfo = downloadedMetadata(fromIPA: path)
         guard let data = metadataInfo.data,
               let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
@@ -5515,7 +5446,7 @@ struct ContentView: View {
     private func downloadedFileFor(_ record: VersionRecord, removesAppStoreUpdates: Bool) -> URL? {
         let appID = activeAppID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !appID.isEmpty else { return nil }
-        return downloadedItems.first { item in
+        return libraryFeature.downloadedItems.first { item in
             guard item.appId == appID,
                   item.removesAppStoreUpdates == removesAppStoreUpdates else {
                 return false
@@ -5530,7 +5461,7 @@ struct ContentView: View {
     }
 
     private func newestDownloadedURL(appID: String, variant: IPADownloadVariant, after startedAt: Date) -> URL? {
-        downloadedItems
+        libraryFeature.downloadedItems
             .filter { item in
                 item.appId == appID
                     && item.removesAppStoreUpdates == variant.removesAppStoreUpdates
@@ -5541,7 +5472,7 @@ struct ContentView: View {
             .fileURL
     }
 
-    private static func runUnzip(_ args: [String]) -> Data? {
+    private nonisolated static func runUnzip(_ args: [String]) -> Data? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
         proc.arguments = args
@@ -5554,13 +5485,13 @@ struct ContentView: View {
         return data.isEmpty ? nil : data
     }
 
-    private static func isFileMaterialized(at path: String) -> Bool {
+    private nonisolated static func isFileMaterialized(at path: String) -> Bool {
         var fileInfo = stat()
         guard lstat(path, &fileInfo) == 0 else { return false }
         return (fileInfo.st_flags & UInt32(SF_DATALESS)) == 0
     }
 
-    private static func downloadedMetadata(fromIPA path: String) -> (data: Data?, removesAppStoreUpdates: Bool) {
+    private nonisolated static func downloadedMetadata(fromIPA path: String) -> (data: Data?, removesAppStoreUpdates: Bool) {
         guard isFileMaterialized(at: path) else { return (nil, false) }
         if let data = runUnzip(["-p", path, "iTunesMetadata.plist"]) {
             return (data, false)
@@ -5571,7 +5502,7 @@ struct ContentView: View {
         return (nil, false)
     }
 
-    private static func extractAppIcon(fromIPA path: String) -> NSImage? {
+    private nonisolated static func extractAppIconData(fromIPA path: String) -> Data? {
         guard let listData = runUnzip(["-Z1", path]),
               let list = String(data: listData, encoding: .utf8) else { return nil }
         let entries = list.split(separator: "\n").map(String.init)
@@ -5584,8 +5515,7 @@ struct ContentView: View {
         let chosen = icons.first { $0.lowercased().contains("60x60@2x") }
             ?? icons.first { $0.lowercased().contains("@2x") }
             ?? icons[0]
-        guard let pngData = runUnzip(["-p", path, chosen]) else { return nil }
-        return NSImage(data: pngData)
+        return runUnzip(["-p", path, chosen])
     }
 
     private func revealInFinder(_ url: URL) {
@@ -5605,22 +5535,22 @@ struct ContentView: View {
 
     private func deleteDownloaded(_ url: URL) {
         try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-        selectedDownloadedItemIDs = selectedDownloadedItemIDs.filter { $0 != url.path }
-        if selectedDownloadedItemID == url.path {
-            selectedDownloadedItemID = nil
+        libraryFeature.selectedDownloadedItemIDs = libraryFeature.selectedDownloadedItemIDs.filter { $0 != url.path }
+        if libraryFeature.selectedDownloadedItemID == url.path {
+            libraryFeature.selectedDownloadedItemID = nil
         }
         refreshDownloadedFiles()
     }
 
     private func openDownloadedItemInSearch(_ item: DownloadedItem) {
         guard !item.appId.isEmpty else { return }
-        selectedApp = searchResult(from: item)
-        selectedAppLocalIconPath = item.id
-        selectedVersion = nil
-        selectedVersionIDs.removeAll()
+        searchFeature.selectedApp = searchResult(from: item)
+        searchFeature.selectedAppLocalIconPath = item.id
+        versionFeature.selectedVersion = nil
+        versionFeature.selectedVersionIDs.removeAll()
         downloadAppID = item.appId
         downloadVersionID = item.versionId
-        manualAppID = item.appId
+        taskFeature.manualAppID = item.appId
         catalog.historyAppID = item.appId
         catalog.selectedSearchID = item.appId
         rightPanel = .search
@@ -5634,15 +5564,15 @@ struct ContentView: View {
 
     private func openDownloadedGroupInSearch(_ group: DownloadedAppGroup) {
         guard let item = group.items.first, !group.appId.isEmpty else { return }
-        selectedApp = searchResult(from: item)
-        selectedAppLocalIconPath = group.iconPath
-        selectedVersion = nil
-        selectedVersionIDs.removeAll()
+        searchFeature.selectedApp = searchResult(from: item)
+        searchFeature.selectedAppLocalIconPath = group.iconPath
+        versionFeature.selectedVersion = nil
+        versionFeature.selectedVersionIDs.removeAll()
         downloadAppID = group.appId
         downloadVersionID = ""
-        manualAppID = group.appId
-        manualVersionID = ""
-        manualNoUpdate = false
+        taskFeature.manualAppID = group.appId
+        taskFeature.manualVersionID = ""
+        taskFeature.manualNoUpdate = false
         catalog.historyAppID = group.appId
         catalog.selectedSearchID = group.appId
         rightPanel = .search
@@ -5680,13 +5610,13 @@ struct ContentView: View {
         }
 
         catalog.historyAppID = appID
-        appleVersionFetchNeedsAcquisition = false
-        selectedVersion = nil
-        selectedVersionIDs.removeAll()
+        versionFeature.appleVersionFetchNeedsAcquisition = false
+        versionFeature.selectedVersion = nil
+        versionFeature.selectedVersionIDs.removeAll()
         catalog.selectedVersionID = nil
         if activeAppIsVision && catalog.historyProvider != "apple" {
-            selectedVersionIDs.removeAll()
-            lastSelectedVersionID = nil
+            versionFeature.selectedVersionIDs.removeAll()
+            versionFeature.lastSelectedVersionID = nil
             catalog.versionResults = []
             catalog.versionStatus = String(localized: "Apple Vision Pro 的 App 历史版本目前仅在 Apple 来源提供，其他来源并未收录。")
             return
@@ -5699,20 +5629,20 @@ struct ContentView: View {
     }
 
     private func submitVerificationCode() {
-        let cleanCode = pendingVerificationCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanCode = accountFeature.pendingVerificationCode.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanCode.isEmpty else {
-            saveMessage = String(localized: "请输入双重认证验证码。")
-            showingVerificationPrompt = true
+            accountFeature.saveMessage = String(localized: "请输入双重认证验证码。")
+            accountFeature.showingVerificationPrompt = true
             return
         }
 
-        pendingVerificationCode = ""
-        showingVerificationPrompt = false
+        accountFeature.pendingVerificationCode = ""
+        accountFeature.showingVerificationPrompt = false
 
-        let jobID = pendingCodeJobID
-        pendingCodeJobID = nil
+        let jobID = accountFeature.pendingCodeJobID
+        accountFeature.pendingCodeJobID = nil
         if let jobID, downloads.job(jobID) != nil {
-            saveMessage = String(localized: "正在完成 Apple 账户双重认证…")
+            accountFeature.saveMessage = String(localized: "正在完成 Apple 账户双重认证…")
             downloads.submitCode(id: jobID, code: cleanCode)
         } else {
             start(verificationCode: cleanCode)
@@ -5721,7 +5651,7 @@ struct ContentView: View {
 
     private func start(verificationCode: String = "", removeAppStoreUpdateMetadataOverride: Bool? = nil) {
         guard let account = accountStore.selectedAccount else {
-            saveMessage = String(localized: "请先登录 Apple 账户。")
+            accountFeature.saveMessage = String(localized: "请先登录 Apple 账户。")
             showSettings()
             return
         }
@@ -5730,7 +5660,7 @@ struct ContentView: View {
         do {
             cleanPassword = try accountStore.password(for: account)
         } catch {
-            saveMessage = error.localizedDescription
+            accountFeature.saveMessage = error.localizedDescription
             return
         }
         let cleanCode = verificationCode.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5739,7 +5669,7 @@ struct ContentView: View {
         let cleanDir = downloadDir.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !cleanAppleAccount.isEmpty, !cleanPassword.isEmpty else {
-            saveMessage = String(localized: "请先登录 Apple 账户。")
+            accountFeature.saveMessage = String(localized: "请先登录 Apple 账户。")
             showSettings()
             return
         }
@@ -5751,7 +5681,7 @@ struct ContentView: View {
             return
         }
 
-        let removeUpdateMetadata = removeAppStoreUpdateMetadataOverride ?? selectedVersion.map { noUpdateEnabled(for: $0) } ?? false
+        let removeUpdateMetadata = removeAppStoreUpdateMetadataOverride ?? versionFeature.selectedVersion.map { noUpdateEnabled(for: $0) } ?? false
         let config = RunConfig(
             appleAccount: cleanAppleAccount,
             password: cleanPassword,
@@ -5763,19 +5693,19 @@ struct ContentView: View {
         )
         let variant = IPADownloadVariant(removeAppStoreUpdateMetadata: removeUpdateMetadata)
         let manualVersionKey = cleanVersionID.isEmpty ? "latest" : cleanVersionID
-        let jobID = selectedVersion.map { downloadJobID(for: $0, removesAppStoreUpdates: removeUpdateMetadata) } ?? "manual-\(cleanAppID)-\(manualVersionKey)-\(variant.rawValue)"
-        let labelVersion = selectedVersion?.version ?? (cleanVersionID.isEmpty ? String(localized: "最新版本") : cleanVersionID)
+        let jobID = versionFeature.selectedVersion.map { downloadJobID(for: $0, removesAppStoreUpdates: removeUpdateMetadata) } ?? "manual-\(cleanAppID)-\(manualVersionKey)-\(variant.rawValue)"
+        let labelVersion = versionFeature.selectedVersion?.version ?? (cleanVersionID.isEmpty ? String(localized: "最新版本") : cleanVersionID)
         let label = "\(activeAppName) \(labelVersion)\(removeUpdateMetadata ? " · 不再更新" : "")"
         downloads.start(id: jobID, label: label, config: config)
     }
 
     private func useSearchResult(_ result: AppSearchResult, openVersions: Bool) {
         downloadAppID = result.id
-        manualAppID = result.id
-        manualVersionID = ""
-        manualNoUpdate = false
-        selectedVersion = nil
-        selectedVersionIDs.removeAll()
+        taskFeature.manualAppID = result.id
+        taskFeature.manualVersionID = ""
+        taskFeature.manualNoUpdate = false
+        versionFeature.selectedVersion = nil
+        versionFeature.selectedVersionIDs.removeAll()
         catalog.historyAppID = result.id
         catalog.selectedSearchID = result.id
 
@@ -5788,7 +5718,7 @@ struct ContentView: View {
     private func useVersion(_ record: VersionRecord) {
         downloadAppID = catalog.historyAppID
         downloadVersionID = record.versionId
-        manualAppID = catalog.historyAppID
+        taskFeature.manualAppID = catalog.historyAppID
         catalog.selectedVersionID = record.id
         catalog.versionStatus = String(localized: "已填入版本 ID：\(record.versionId)。")
     }
@@ -5816,546 +5746,6 @@ struct ContentView: View {
     }
 }
 
-struct SearchResultRow: View {
-    let result: AppSearchResult
-
-    var body: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 10) {
-                RetryingAsyncImage(url: URL(string: result.artworkUrl)) { image in
-                    image
-                        .resizable()
-                        .scaledToFit()
-                } placeholder: {
-                    RoundedRectangle(cornerRadius: iconCornerRadius)
-                        .fill(.quaternary)
-                }
-                .frame(width: 36, height: 36)
-                .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(result.name.isEmpty ? result.id : result.name)
-                        .lineLimit(1)
-                    Text(result.artistName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text(result.id)
-                .frame(width: 110, alignment: .leading)
-                .textSelection(.enabled)
-
-            Text(result.bundleId)
-                .frame(width: 210, alignment: .leading)
-                .lineLimit(1)
-                .textSelection(.enabled)
-
-            Text(result.version)
-                .frame(width: 90, alignment: .leading)
-                .lineLimit(1)
-
-            Text(result.fileSizeText)
-                .frame(width: 80, alignment: .leading)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .padding(.vertical, 7)
-    }
-
-    private var iconCornerRadius: CGFloat {
-        result.isVisionApp ? 18 : 8
-    }
-}
-
-struct AppSidebarRow: View {
-    let rank: Int
-    let result: AppSearchResult
-    let isSelected: Bool
-    @State private var isHovered = false
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        HStack(spacing: 10) {
-            appIcon
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(result.name.isEmpty ? result.id : result.name)
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(isSelected ? Color.white : Color.primary)
-                    .lineLimit(1)
-
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(result.artistName)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    if !result.fileSizeText.isEmpty {
-                        Spacer(minLength: 8)
-                        Text(result.fileSizeText)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(isSelected ? Color.white.opacity(0.78) : Color.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 50)
-        .background(rowFill, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .onHover { isHovered = $0 }
-    }
-
-    private var rowFill: Color {
-        if isSelected {
-            return Color(nsColor: .selectedContentBackgroundColor)
-        }
-        if isHovered {
-            return colorScheme == .dark ? Color.white.opacity(0.075) : Color.black.opacity(0.045)
-        }
-        return .clear
-    }
-
-    private var appIcon: some View {
-        RetryingAsyncImage(url: URL(string: result.artworkUrl)) { image in
-            image
-                .resizable()
-                .scaledToFill()
-        } placeholder: {
-            iconShape
-                .fill(.quaternary)
-        }
-        .frame(width: 34, height: 34)
-        .clipShape(iconShape)
-        .overlay {
-            iconShape
-                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.14), lineWidth: 0.5)
-        }
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.13), radius: 4, x: 0, y: 2)
-    }
-
-    private var iconShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: result.isVisionApp ? 17 : 8.5, style: .continuous)
-    }
-}
-
-private struct DownloadedAppSidebarRow: View {
-    let group: DownloadedAppGroup
-    let icon: NSImage?
-    let isSelected: Bool
-    @Binding var remoteIconCache: [String: NSImage]
-    @State private var isHovered = false
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        HStack(spacing: 10) {
-            appIcon
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(group.appName.isEmpty ? String(localized: "未知 App") : group.appName)
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(isSelected ? Color.white : Color.primary)
-                    .lineLimit(1)
-
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(group.developer.isEmpty ? group.bundleId : group.developer)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Spacer(minLength: 8)
-                    Text(String(localized: "\(group.items.count) 个版本"))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-                .font(.caption)
-                .foregroundStyle(isSelected ? Color.white.opacity(0.78) : Color.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 50)
-        .background(rowFill, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .onHover { isHovered = $0 }
-    }
-
-    private var rowFill: Color {
-        if isSelected {
-            return Color(nsColor: .selectedContentBackgroundColor)
-        }
-        if isHovered {
-            return colorScheme == .dark ? Color.white.opacity(0.075) : Color.black.opacity(0.045)
-        }
-        return .clear
-    }
-
-    private var appIcon: some View {
-        Group {
-            if let icon {
-                Image(nsImage: icon)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFill()
-            } else if !group.artworkUrl.isEmpty {
-                CachedRemoteAppIcon(
-                    urlString: group.artworkUrl,
-                    size: 34,
-                    cornerRadius: iconCornerRadius,
-                    cache: $remoteIconCache
-                )
-            } else {
-                RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
-                    .fill(.quaternary)
-                    .overlay {
-                        Image(systemName: "app")
-                            .font(.system(size: 15))
-                            .foregroundStyle(.secondary)
-                    }
-            }
-        }
-        .frame(width: 34, height: 34)
-        .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
-                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.14), lineWidth: 0.5)
-        }
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.13), radius: 4, x: 0, y: 2)
-    }
-
-    private var iconCornerRadius: CGFloat {
-        group.isVisionApp ? 17 : 8.5
-    }
-}
-
-private struct DownloadedVersionHistoryRow: View {
-    struct Columns {
-        let version: CGFloat
-        let versionID: CGFloat
-        let size: CGFloat
-        let region: CGFloat
-        let account: CGFloat
-        let noUpdates: CGFloat
-    }
-
-    static let iconColumnWidth: CGFloat = 50
-    static let accountToNoUpdatesGap: CGFloat = 22
-    static let actionGap: CGFloat = 12
-    static let actionColumnWidth: CGFloat = 104
-    static let rowHorizontalPadding: CGFloat = 16
-
-    static func columns(for fullWidth: CGFloat) -> Columns {
-        let baseVersion: CGFloat = 94
-        let baseVersionID: CGFloat = 128
-        let baseSize: CGFloat = 88
-        let baseRegion: CGFloat = 86
-        let baseAccount: CGFloat = 184
-        let baseNoUpdates: CGFloat = 74
-        let natural = baseVersion + baseVersionID + baseSize + baseRegion + baseAccount + accountToNoUpdatesGap + baseNoUpdates
-        let reserved = rowHorizontalPadding * 2 + iconColumnWidth + actionGap + actionColumnWidth
-        let available = max(1, fullWidth - reserved)
-
-        if available < natural {
-            let scale = available / natural
-            return Columns(
-                version: baseVersion * scale,
-                versionID: baseVersionID * scale,
-                size: baseSize * scale,
-                region: baseRegion * scale,
-                account: baseAccount * scale,
-                noUpdates: baseNoUpdates * scale
-            )
-        }
-
-        let extra = available - natural
-        return Columns(
-            version: baseVersion + extra * 0.12,
-            versionID: baseVersionID + extra * 0.20,
-            size: baseSize + extra * 0.10,
-            region: baseRegion + extra * 0.10,
-            account: baseAccount + extra * 0.36,
-            noUpdates: baseNoUpdates + extra * 0.10
-        )
-    }
-
-    static func visualDividerOffsets(for columns: Columns) -> [CGFloat] {
-        let start = rowHorizontalPadding + iconColumnWidth
-        let visualShift: CGFloat = 7
-        return [
-            start + columns.version - visualShift,
-            start + columns.version + columns.versionID - visualShift,
-            start + columns.version + columns.versionID + columns.size - visualShift,
-            start + columns.version + columns.versionID + columns.size + columns.region - visualShift,
-            start + columns.version + columns.versionID + columns.size + columns.region + columns.account + accountToNoUpdatesGap - visualShift
-        ]
-    }
-
-    let item: DownloadedItem
-    let icon: NSImage?
-    let rowIndex: Int
-    let isSelected: Bool
-    @Binding var remoteIconCache: [String: NSImage]
-    let onSelect: () -> Void
-    let onReveal: () -> Void
-    let onAirDrop: () -> Void
-    let onDelete: () -> Void
-    @State private var isHovered = false
-    @Namespace private var actionGlassNamespace
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        GeometryReader { proxy in
-            let columns = Self.columns(for: proxy.size.width)
-            let region = appStoreRegion(item.storefrontId)
-
-            HStack(spacing: 0) {
-                rowIcon
-
-                Text(item.version.isEmpty ? "—" : item.version)
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(primaryTextStyle)
-                    .lineLimit(1)
-                    .frame(width: columns.version, alignment: .leading)
-
-                HoverCopyIDText(value: item.versionId, isVisible: isHovered, isSelected: isSelected)
-                    .frame(width: columns.versionID, alignment: .leading)
-
-                Text(item.sizeText)
-                    .font(.callout)
-                    .foregroundStyle(secondaryTextStyle)
-                    .lineLimit(1)
-                    .frame(width: columns.size, alignment: .leading)
-
-                Text(region.name)
-                    .font(.callout)
-                    .foregroundStyle(secondaryTextStyle)
-                    .lineLimit(1)
-                    .frame(width: columns.region, alignment: .leading)
-
-                Text(item.appleAccount.isEmpty ? "—" : item.appleAccount)
-                    .font(.callout)
-                    .foregroundStyle(secondaryTextStyle)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(width: columns.account, alignment: .leading)
-
-                Color.clear.frame(width: Self.accountToNoUpdatesGap, height: 1)
-
-                Text(item.removesAppStoreUpdates ? String(localized: "是") : String(localized: "否"))
-                    .font(.callout)
-                    .foregroundStyle(secondaryTextStyle)
-                    .lineLimit(1)
-                    .frame(width: columns.noUpdates, alignment: .leading)
-
-                Color.clear.frame(width: Self.actionGap, height: 1)
-
-                FileActionsBar(isSelected: isSelected, onReveal: onReveal, onAirDrop: onAirDrop, onDelete: onDelete)
-                    .frame(width: Self.actionColumnWidth, alignment: .trailing)
-            }
-            .padding(.horizontal, Self.rowHorizontalPadding)
-            .frame(width: proxy.size.width, height: 46, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, minHeight: 46, maxHeight: 46, alignment: .leading)
-        .background(rowFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .onTapGesture {
-            onSelect()
-        }
-        .onHover { isHovered = $0 }
-    }
-
-    private var rowIcon: some View {
-        Group {
-            if let icon {
-                Image(nsImage: icon)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFill()
-            } else if !item.artworkUrl.isEmpty {
-                CachedRemoteAppIcon(
-                    urlString: item.artworkUrl,
-                    size: 24,
-                    cornerRadius: rowIconCornerRadius,
-                    cache: $remoteIconCache
-                )
-            } else {
-                RoundedRectangle(cornerRadius: rowIconCornerRadius, style: .continuous)
-                    .fill(.quaternary)
-                    .overlay {
-                        Image(systemName: "app")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                    }
-            }
-        }
-        .frame(width: 24, height: 24)
-        .clipShape(RoundedRectangle(cornerRadius: rowIconCornerRadius, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: rowIconCornerRadius, style: .continuous)
-                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.14), lineWidth: 0.5)
-        }
-        .frame(width: Self.iconColumnWidth, alignment: .center)
-        .offset(x: -4)
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.22 : 0.12), radius: 4, x: 0, y: 2)
-    }
-
-    private var rowIconCornerRadius: CGFloat {
-        item.isVisionApp ? 12 : 6
-    }
-
-    private var rowFill: Color {
-        if isSelected {
-            return Color(nsColor: .selectedContentBackgroundColor)
-        }
-        if isHovered {
-            return colorScheme == .dark ? Color.white.opacity(0.075) : Color.black.opacity(0.045)
-        }
-        if rowIndex.isMultiple(of: 2) {
-            return colorScheme == .dark ? Color.white.opacity(0.030) : Color.black.opacity(0.022)
-        }
-        return .clear
-    }
-
-    private var primaryTextStyle: Color {
-        isSelected ? Color.white : Color.primary
-    }
-
-    private var secondaryTextStyle: Color {
-        isSelected ? Color.white.opacity(0.80) : Color.secondary
-    }
-}
-
-private struct SourceProviderCapsule: View {
-    let selection: String
-    let isDisabled: Bool
-    let onSelect: (String) -> Void
-    @State private var hoveredProvider: String?
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var providers: [(id: String, title: String)] {
-        [
-            ("auto", String(localized: "自动")),
-            ("timbrd", "Timbrd"),
-            ("agzy", "Agzy"),
-            ("bilin", "Bilin"),
-            ("apple", "Apple"),
-        ]
-    }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(providers.indices, id: \.self) { index in
-                let provider = providers[index]
-                let isSelected = selection == provider.id
-                Button {
-                    guard !isDisabled else { return }
-                    onSelect(provider.id)
-                } label: {
-                    Text(provider.title)
-                        .font(.callout.weight(isSelected ? .semibold : .regular))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.84)
-                        .frame(maxWidth: .infinity, minHeight: 30)
-                        .padding(.horizontal, 8)
-                        .foregroundStyle(isSelected ? Color.white : Color.primary)
-                        .background {
-                            if isSelected {
-                                Capsule()
-                                    .fill(Color(nsColor: .selectedContentBackgroundColor))
-                            } else if hoveredProvider == provider.id && !isDisabled {
-                                Capsule()
-                                    .fill(providerHoverFill)
-                            }
-                        }
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(StablePressButtonStyle())
-                .onHover { hovering in
-                    hoveredProvider = hovering ? provider.id : (hoveredProvider == provider.id ? nil : hoveredProvider)
-                }
-
-                if index < providers.count - 1 {
-                    Rectangle()
-                        .fill(providerDividerFill)
-                        .frame(width: 1, height: 18)
-                        .padding(.horizontal, 2)
-                        .opacity(shouldShowDivider(after: index) ? 1 : 0)
-                }
-            }
-        }
-        .padding(3)
-        .frame(height: 36)
-        .background(providerBaseFill, in: Capsule())
-        .overlay {
-            Capsule()
-                .stroke(providerStroke, lineWidth: 1)
-        }
-        .glassEffect(.regular.tint(providerGlassTint).interactive(), in: Capsule())
-        .opacity(isDisabled ? 0.55 : 1)
-        .allowsHitTesting(!isDisabled)
-    }
-
-    private func shouldShowDivider(after index: Int) -> Bool {
-        guard index < providers.count - 1 else { return false }
-        let left = providers[index].id
-        let right = providers[index + 1].id
-        return left != selection
-            && right != selection
-            && left != hoveredProvider
-            && right != hoveredProvider
-    }
-
-    private var providerBaseFill: Color {
-        colorScheme == .dark ? Color.white.opacity(0.07) : Color.black.opacity(0.06)
-    }
-
-    private var providerHoverFill: Color {
-        colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.08)
-    }
-
-    private var providerGlassTint: Color {
-        colorScheme == .dark ? Color(red: 0.10, green: 0.12, blue: 0.16).opacity(0.25) : Color.white.opacity(0.36)
-    }
-
-    private var providerStroke: Color {
-        colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.035)
-    }
-
-    private var providerDividerFill: Color {
-        colorScheme == .dark ? Color.white.opacity(0.16) : Color(nsColor: .separatorColor).opacity(0.34)
-    }
-}
-
-private struct AccountSelectionButton: View {
-    let isSelected: Bool
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                .frame(width: 24, height: 24)
-                .background {
-                    if isHovered {
-                        Circle()
-                            .fill(Color.primary.opacity(0.07))
-                    }
-                }
-        }
-        .buttonStyle(StablePressButtonStyle())
-        .onHover { isHovered = $0 }
-    }
-}
-
 private struct SettingsHoverIconButton: View {
     let systemImage: String
     let help: String
@@ -6377,569 +5767,6 @@ private struct SettingsHoverIconButton: View {
         }
         .buttonStyle(StablePressButtonStyle())
         .onHover { isHovered = $0 }
-    }
-}
-
-struct VersionResultRow: View {
-    let record: VersionRecord
-    @State private var isHovered = false
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Text(record.version)
-                .frame(width: 170, alignment: .leading)
-                .lineLimit(1)
-
-            HoverCopyIDText(value: record.versionId, isVisible: isHovered, isSelected: false)
-                .frame(width: 190, alignment: .leading)
-
-            Text(record.size.isEmpty ? "-" : record.size)
-                .frame(width: 130, alignment: .leading)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-
-            Text(record.source)
-                .frame(width: 110, alignment: .leading)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-
-            Spacer()
-            Text("")
-                .frame(width: 82)
-        }
-        .padding(.vertical, 7)
-        .onHover { isHovered = $0 }
-    }
-}
-
-struct AppSearchTile: View {
-    let rank: Int
-    let result: AppSearchResult
-    let isSelected: Bool
-
-    var body: some View {
-        HStack(spacing: 10) {
-            appIcon
-                .padding(.leading, 4)
-
-            Text("\(rank)")
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 22, alignment: .trailing)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(result.name.isEmpty ? result.id : result.name)
-                    .font(.headline)
-                    .lineLimit(1)
-
-                Text(result.artistName)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                if !result.version.isEmpty || !result.fileSizeText.isEmpty {
-                    HStack(spacing: 8) {
-                        if !result.version.isEmpty {
-                            Label(result.version, systemImage: "sparkle")
-                        }
-                        if !result.fileSizeText.isEmpty {
-                            Label(result.fileSizeText, systemImage: "internaldrive")
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                }
-            }
-
-            Spacer(minLength: 8)
-
-            Text(isSelected ? String(localized: "已选") : String(localized: "前往"))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(isSelected ? .white : Color.accentColor)
-                .padding(.horizontal, 13)
-                .frame(height: 28)
-                .background {
-                    Capsule()
-                        .fill(isSelected ? Color(nsColor: .selectedContentBackgroundColor) : Color.primary.opacity(0.07))
-                        .overlay {
-                            if !isSelected {
-                                Capsule()
-                                    .stroke(Color(nsColor: .separatorColor).opacity(0.18), lineWidth: 1)
-                            }
-                        }
-                }
-        }
-        .padding(.vertical, 12)
-        .padding(.trailing, 6)
-        .contentShape(Rectangle())
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor).opacity(0.55))
-                .frame(height: 1)
-                .padding(.leading, 86)
-        }
-    }
-
-    private var appIcon: some View {
-        RetryingAsyncImage(url: URL(string: result.artworkUrl)) { image in
-            image
-                .resizable()
-                .scaledToFill()
-        } placeholder: {
-            iconShape
-                .fill(.quaternary)
-        }
-        .frame(width: 48, height: 48)
-        .clipShape(iconShape)
-        .overlay {
-            iconShape
-                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.14), lineWidth: 0.5)
-        }
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.16), radius: 5, x: 0, y: 2)
-    }
-
-    private var iconShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: result.isVisionApp ? 24 : 12.5, style: .continuous)
-    }
-}
-
-struct AppStoreSearchResultRow: View {
-    let rank: Int
-    let result: AppSearchResult
-    let isSelected: Bool
-
-    var body: some View {
-        HStack(spacing: 16) {
-            RetryingAsyncImage(url: URL(string: result.artworkUrl)) { image in
-                image
-                    .resizable()
-                    .scaledToFit()
-            } placeholder: {
-                RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
-                    .fill(.quaternary)
-            }
-            .frame(width: 64, height: 64)
-            .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous))
-            .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
-
-            Text("\(rank)")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 34, alignment: .trailing)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(result.name.isEmpty ? result.id : result.name)
-                    .font(.headline)
-                    .lineLimit(1)
-
-                Text(result.artistName)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                HStack(spacing: 12) {
-                    Label(result.version.isEmpty ? String(localized: "版本未知") : result.version, systemImage: "sparkle")
-                    if !result.fileSizeText.isEmpty {
-                        Label(result.fileSizeText, systemImage: "internaldrive")
-                    }
-                    Label(result.id, systemImage: "app.badge")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
-
-            Spacer(minLength: 12)
-
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "icloud.and.arrow.down")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(isSelected ? Color.accentColor : Color.accentColor)
-                .frame(width: 40)
-        }
-        .padding(.vertical, 16)
-        .contentShape(Rectangle())
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor).opacity(0.55))
-                .frame(height: 1)
-                .padding(.leading, 114)
-        }
-    }
-
-    private var iconCornerRadius: CGFloat {
-        result.isVisionApp ? 32 : 14
-    }
-}
-
-struct AppSelectionCard: View {
-    let result: AppSearchResult
-    let isSelected: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 12) {
-                RetryingAsyncImage(url: URL(string: result.artworkUrl)) { image in
-                    image
-                        .resizable()
-                        .scaledToFit()
-                } placeholder: {
-                    RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
-                        .fill(.quaternary)
-                }
-                .frame(width: 58, height: 58)
-                .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous))
-                .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
-
-                Spacer()
-
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "chevron.right.circle")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(result.name.isEmpty ? result.id : result.name)
-                    .font(.headline)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-
-                Text(result.artistName)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 4)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Label(result.id, systemImage: "app.badge")
-                Label(result.version.isEmpty ? String(localized: "版本未知") : result.version, systemImage: "sparkle")
-                if !result.fileSizeText.isEmpty {
-                    Label(result.fileSizeText, systemImage: "internaldrive")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-        .padding(20)
-        .frame(height: 230)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(isSelected ? Color.accentColor.opacity(0.55) : Color(nsColor: .separatorColor).opacity(0.25), lineWidth: isSelected ? 2 : 1)
-        }
-    }
-
-    private var iconCornerRadius: CGFloat {
-        result.isVisionApp ? 29 : 14
-    }
-}
-
-struct VersionSelectionRow: View {
-    struct Columns {
-        let version: CGFloat
-        let versionID: CGFloat
-        let size: CGFloat
-        let noUpdates: CGFloat
-    }
-
-    static let iconColumnWidth: CGFloat = 50
-    static let versionColumnWidth: CGFloat = 132
-    static let versionIDColumnWidth: CGFloat = 178
-    static let sizeColumnWidth: CGFloat = 118
-    static let noUpdatesColumnWidth: CGFloat = 112
-    static let noUpdatesToggleTrailingInset: CGFloat = 8
-    static let noUpdatesSwitchApproxWidth: CGFloat = 48
-    static let noUpdatesHeaderDividerGap: CGFloat = 8
-    static let actionGap: CGFloat = 12
-    static var actionColumnWidth: CGFloat {
-        usesWideDownloadButton ? 112 : 96
-    }
-    static var downloadButtonWidth: CGFloat {
-        usesWideDownloadButton ? 82 : 58
-    }
-    static let rowHorizontalPadding: CGFloat = 16
-
-    static var usesWideDownloadButton: Bool {
-        let code = AppLanguage.effectiveCode.lowercased()
-        return code.hasPrefix("en") || code.hasPrefix("ja")
-    }
-
-    static func columns(for fullWidth: CGFloat) -> Columns {
-        let baseVersion: CGFloat = 126
-        let baseVersionID: CGFloat = 196
-        let baseSize: CGFloat = 118
-        let baseNoUpdates: CGFloat = noUpdatesColumnWidth
-        let natural = baseVersion + baseVersionID + baseSize + baseNoUpdates
-        let reserved = rowHorizontalPadding * 2 + iconColumnWidth + actionGap + actionColumnWidth
-        let available = max(1, fullWidth - reserved)
-
-        if available < natural {
-            let scale = available / natural
-            return Columns(
-                version: baseVersion * scale,
-                versionID: baseVersionID * scale,
-                size: baseSize * scale,
-                noUpdates: baseNoUpdates * scale
-            )
-        }
-
-        let extra = available - natural
-        return Columns(
-            version: baseVersion + extra * 0.28,
-            versionID: baseVersionID + extra * 0.48,
-            size: baseSize + extra * 0.24,
-            noUpdates: baseNoUpdates
-        )
-    }
-
-    static func noUpdatesHeaderInset(for columns: Columns) -> CGFloat {
-        max(0, columns.noUpdates - noUpdatesToggleTrailingInset - noUpdatesSwitchApproxWidth)
-    }
-
-    static func visualDividerOffsets(for columns: Columns) -> [CGFloat] {
-        let start = rowHorizontalPadding + iconColumnWidth
-        let visualShift: CGFloat = 7
-        let noUpdatesDividerInset = max(12, noUpdatesHeaderInset(for: columns) - noUpdatesHeaderDividerGap)
-        return [
-            start + columns.version - visualShift,
-            start + columns.version + columns.versionID - visualShift,
-            start + columns.version + columns.versionID + columns.size + noUpdatesDividerInset
-        ]
-    }
-
-    let record: VersionRecord
-    let rowIndex: Int
-    let isSelected: Bool
-    let removesAppStoreUpdates: Bool
-    let isDownloading: Bool
-    let downloadProgress: Double?
-    let isPackaging: Bool
-    let hasError: Bool
-    let errorLog: String
-    let downloadedURL: URL?
-    let appIcon: NSImage?
-    let onSelect: () -> Void
-    let onToggleNoUpdate: (Bool) -> Void
-    let onDownload: () -> Void
-    let onSignIn: () -> Void
-    let onReveal: () -> Void
-    let onAirDrop: () -> Void
-    let onDelete: () -> Void
-    @State private var isHovered = false
-    @Namespace private var actionGlassNamespace
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        GeometryReader { proxy in
-            let columns = Self.columns(for: proxy.size.width)
-
-            HStack(spacing: 0) {
-                rowIcon
-
-                Text(record.version)
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(primaryTextStyle)
-                    .lineLimit(1)
-                    .frame(width: columns.version, alignment: .leading)
-
-                HoverCopyIDText(value: record.versionId, isVisible: isHovered, isSelected: isSelected)
-                    .frame(width: columns.versionID, alignment: .leading)
-
-                Text(record.size.isEmpty ? "-" : record.size)
-                    .font(.callout)
-                    .frame(width: columns.size, alignment: .leading)
-                    .foregroundStyle(secondaryTextStyle)
-                    .lineLimit(1)
-
-                HStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    Toggle("", isOn: Binding(
-                        get: { removesAppStoreUpdates },
-                        set: { enabled in
-                            withAnimation(.smooth(duration: 0.22)) {
-                                onToggleNoUpdate(enabled)
-                            }
-                        }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .fixedSize()
-                }
-                .padding(.trailing, Self.noUpdatesToggleTrailingInset)
-                .frame(width: columns.noUpdates, alignment: .trailing)
-                .help(String(localized: "下载后不再显示 App Store 更新"))
-
-                Color.clear
-                    .frame(width: Self.actionGap, height: 1)
-
-                actionSlot
-            }
-            .padding(.horizontal, Self.rowHorizontalPadding)
-            .frame(width: proxy.size.width, height: 46, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, minHeight: 46, maxHeight: 46, alignment: .leading)
-        .background(rowFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .simultaneousGesture(TapGesture().onEnded {
-            onSelect()
-        })
-        .onHover { isHovered = $0 }
-    }
-
-    private var rowIcon: some View {
-        Group {
-            if let appIcon {
-                Image(nsImage: appIcon)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 24, height: 24)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            } else {
-                Color.clear.frame(width: 24, height: 24)
-            }
-        }
-        .frame(width: VersionSelectionRow.iconColumnWidth, alignment: .center)
-        .offset(x: -4)
-        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.14), radius: 4, x: 0, y: 2)
-    }
-
-    @ViewBuilder
-    private var actionSlot: some View {
-        GlassEffectContainer(spacing: 0) {
-            ZStack(alignment: .trailing) {
-                actionContent
-                    .id(actionState)
-            }
-        }
-        .frame(width: Self.actionColumnWidth, alignment: .trailing)
-        .animation(.smooth(duration: 0.32), value: actionState)
-    }
-
-    @ViewBuilder
-    private var actionContent: some View {
-        switch actionState {
-        case .error:
-            DownloadErrorIndicator(
-                message: errorMessage,
-                requiresSignIn: downloadRequiresRelogin(from: errorLog),
-                retry: onDownload,
-                signIn: onSignIn
-            )
-        case .running:
-            DownloadProgressPill(progress: downloadProgress, isPackaging: isPackaging)
-                .glassEffectID("version-row-action", in: actionGlassNamespace)
-                .glassEffectTransition(.matchedGeometry)
-        case .downloaded:
-            FileActionsBar(isSelected: isSelected, onReveal: onReveal, onAirDrop: onAirDrop, onDelete: onDelete)
-                .glassEffectID("version-row-action", in: actionGlassNamespace)
-                .glassEffectTransition(.matchedGeometry)
-        case .ready:
-            Button {
-                onDownload()
-            } label: {
-                Text(String(localized: "下载"))
-                    .font(.caption.weight(.semibold))
-                    .frame(width: VersionSelectionRow.downloadButtonWidth, height: 26)
-                    .background {
-                        if isSelected {
-                            Capsule()
-                                .fill(Color.white.opacity(0.56))
-                        }
-                    }
-                    .overlay {
-                        if isSelected {
-                            Capsule()
-                                .stroke(Color.white.opacity(0.48), lineWidth: 1)
-                        }
-                    }
-            }
-            .buttonStyle(StablePressButtonStyle())
-            .foregroundStyle(Color.accentColor)
-            .glassEffect(.regular.tint(isSelected ? Color.white.opacity(0.34) : nil).interactive(), in: Capsule())
-            .glassEffectID("version-row-action", in: actionGlassNamespace)
-            .glassEffectTransition(.matchedGeometry)
-        }
-    }
-
-    private enum ActionState: Hashable {
-        case error
-        case running
-        case downloaded
-        case ready
-    }
-
-    private var actionState: ActionState {
-        if hasError { return .error }
-        if isDownloading { return .running }
-        if downloadedURL != nil { return .downloaded }
-        return .ready
-    }
-
-    private var rowFill: Color {
-        if isSelected {
-            return Color(nsColor: .selectedContentBackgroundColor)
-        }
-        if isHovered {
-            return colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.055)
-        }
-        if rowIndex.isMultiple(of: 2) {
-            return colorScheme == .dark ? Color.white.opacity(0.030) : Color.black.opacity(0.022)
-        }
-        return .clear
-    }
-
-    private var primaryTextStyle: Color {
-        isSelected ? Color.white : Color.primary
-    }
-
-    private var secondaryTextStyle: Color {
-        isSelected ? Color.white.opacity(0.80) : Color.secondary
-    }
-
-    private var errorMessage: String {
-        downloadErrorMessage(from: errorLog)
-    }
-}
-
-private struct DownloadErrorIndicator: View {
-    let message: String
-    let requiresSignIn: Bool
-    let retry: () -> Void
-    let signIn: () -> Void
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Button(action: retry) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.yellow)
-                    .frame(width: requiresSignIn ? 30 : 58, height: 26)
-                    .contentShape(Capsule())
-            }
-            .buttonStyle(StablePressButtonStyle())
-            .glassEffect(.regular.tint(Color.yellow.opacity(0.18)).interactive(), in: Capsule())
-            .help(message)
-
-            if requiresSignIn {
-                Button(action: signIn) {
-                    Label(String(localized: "登录"), systemImage: "person.crop.circle")
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .frame(width: 62, height: 26)
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(StablePressButtonStyle())
-                .foregroundStyle(Color.accentColor)
-                .glassEffect(.regular.interactive(), in: Capsule())
-                .help(message)
-            }
-        }
     }
 }
 
@@ -6989,7 +5816,7 @@ private struct AppIDCopyLine: View {
     }
 }
 
-private struct HoverCopyIDText: View {
+struct HoverCopyIDText: View {
     let value: String
     let isVisible: Bool
     let isSelected: Bool
@@ -7036,6 +5863,8 @@ private struct CopyGlyphButton: View {
         }
         .buttonStyle(.borderless)
         .foregroundStyle(buttonTint)
+        .accessibilityLabel(copied ? String(localized: "已复制") : String(localized: "复制"))
+        .help(String(localized: "复制"))
     }
 
     private var buttonTint: Color {
@@ -7043,7 +5872,7 @@ private struct CopyGlyphButton: View {
     }
 }
 
-private struct FileActionsBar: View {
+struct FileActionsBar: View {
     let isSelected: Bool
     let onReveal: () -> Void
     let onAirDrop: () -> Void
@@ -7084,7 +5913,7 @@ private struct FileActionButton: View {
     }
 }
 
-private struct CachedRemoteAppIcon: View {
+struct CachedRemoteAppIcon: View {
     let urlString: String
     let size: CGFloat
     let cornerRadius: CGFloat
@@ -7126,7 +5955,7 @@ private struct CachedRemoteAppIcon: View {
     }
 }
 
-private struct RetryingAsyncImage<Content: View, Placeholder: View>: View {
+struct RetryingAsyncImage<Content: View, Placeholder: View>: View {
     let url: URL?
     var maxRetries: Int = 4
     @ViewBuilder let content: (Image) -> Content
@@ -7170,7 +5999,7 @@ private struct RetryingAsyncImage<Content: View, Placeholder: View>: View {
     }
 }
 
-private struct DownloadProgressPill: View {
+struct DownloadProgressPill: View {
     let progress: Double?
     var isPackaging: Bool = false
 
@@ -7306,7 +6135,7 @@ private struct SidebarActionButtonStyleModifier: ViewModifier {
     }
 }
 
-private struct StablePressButtonStyle: ButtonStyle {
+struct StablePressButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
     }
@@ -7338,33 +6167,58 @@ private func formatByteString(_ value: String) -> String {
     return String(format: index == 0 ? "%.0f %@" : "%.1f %@", size, units[index])
 }
 
-private struct SettingsNavigationContext {
-    var canGoBack = false
-    var canGoForward = false
-    var goBack: () -> Void = {}
-    var goForward: () -> Void = {}
-}
+@MainActor
+@Observable
+private final class SettingsNavigationModel {
+    var tab: SettingsTab = .account
+    private var backStack: [SettingsTab] = []
+    private var forwardStack: [SettingsTab] = []
+    private var isHistoryNavigation = false
 
-private struct SettingsNavigationContextKey: EnvironmentKey {
-    static let defaultValue = SettingsNavigationContext()
-}
+    var canGoBack: Bool { !backStack.isEmpty }
+    var canGoForward: Bool { !forwardStack.isEmpty }
 
-private extension EnvironmentValues {
-    var settingsNavigationContext: SettingsNavigationContext {
-        get { self[SettingsNavigationContextKey.self] }
-        set { self[SettingsNavigationContextKey.self] = newValue }
+    func selectedTabChanged(from oldValue: SettingsTab, to newValue: SettingsTab) {
+        guard oldValue != newValue else { return }
+        if isHistoryNavigation {
+            isHistoryNavigation = false
+            return
+        }
+        backStack.append(oldValue)
+        forwardStack.removeAll()
+    }
+
+    func reset() {
+        if tab != .account {
+            isHistoryNavigation = true
+            tab = .account
+        }
+        backStack.removeAll()
+        forwardStack.removeAll()
+    }
+
+    func goBack() {
+        guard let previous = backStack.popLast() else { return }
+        forwardStack.append(tab)
+        isHistoryNavigation = true
+        tab = previous
+    }
+
+    func goForward() {
+        guard let next = forwardStack.popLast() else { return }
+        backStack.append(tab)
+        isHistoryNavigation = true
+        tab = next
     }
 }
 
 struct SettingsRootView: View {
-    @State private var tab: SettingsTab = .account
-    @State private var backStack: [SettingsTab] = []
-    @State private var forwardStack: [SettingsTab] = []
-    @State private var isHistoryNavigation = false
+    @State private var navigation = SettingsNavigationModel()
 
     var body: some View {
+        @Bindable var navigation = navigation
         NavigationSplitView {
-            List(SettingsTab.allCases, selection: $tab) { item in
+            List(SettingsTab.allCases, selection: $navigation.tab) { item in
                 Label(item.title, systemImage: item.systemImage)
                     .tag(item)
             }
@@ -7372,7 +6226,7 @@ struct SettingsRootView: View {
             .navigationSplitViewColumnWidth(min: 230, ideal: 250, max: 270)
             .toolbar(removing: .sidebarToggle)
         } detail: {
-            switch tab {
+            switch navigation.tab {
             case .account: AccountSettingsView()
             case .storage: StorageSettingsView()
             case .language: LanguageSettingsView()
@@ -7382,46 +6236,13 @@ struct SettingsRootView: View {
         .navigationSplitViewStyle(.balanced)
         .toolbar(removing: .title)
         .background(SettingsWindowConfigurator())
-        .environment(\.settingsNavigationContext,
-                      SettingsNavigationContext(canGoBack: !backStack.isEmpty,
-                                                canGoForward: !forwardStack.isEmpty,
-                                                goBack: goBack,
-                                                goForward: goForward))
-        .onChange(of: tab) { oldValue, newValue in
-            guard oldValue != newValue else { return }
-            if isHistoryNavigation {
-                isHistoryNavigation = false
-                return
-            }
-            backStack.append(oldValue)
-            forwardStack.removeAll()
+        .environment(navigation)
+        .onChange(of: navigation.tab) { oldValue, newValue in
+            navigation.selectedTabChanged(from: oldValue, to: newValue)
         }
         .frame(minWidth: 860, minHeight: 560)
-        .onAppear(perform: resetToAccount)
-        .onDisappear(perform: resetToAccount)
-    }
-
-    private func resetToAccount() {
-        if tab != .account {
-            isHistoryNavigation = true
-            tab = .account
-        }
-        backStack.removeAll()
-        forwardStack.removeAll()
-    }
-
-    private func goBack() {
-        guard let previous = backStack.popLast() else { return }
-        forwardStack.append(tab)
-        isHistoryNavigation = true
-        tab = previous
-    }
-
-    private func goForward() {
-        guard let next = forwardStack.popLast() else { return }
-        backStack.append(tab)
-        isHistoryNavigation = true
-        tab = next
+        .onAppear { navigation.reset() }
+        .onDisappear { navigation.reset() }
     }
 }
 
@@ -7444,7 +6265,7 @@ private struct SettingsPill: View {
 }
 
 private struct SettingsContentPane<Accessory: View, Content: View>: View {
-    @Environment(\.settingsNavigationContext) private var navigationContext
+    @Environment(SettingsNavigationModel.self) private var navigation
     let tab: SettingsTab
     private let accessory: Accessory
     private let content: Content
@@ -7465,11 +6286,10 @@ private struct SettingsContentPane<Accessory: View, Content: View>: View {
             .padding(.top, 18)
             .padding(.bottom, 24)
             .padding(.horizontal, 20)
-            .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollIndicators(.visible)
-        .scrollEdgeEffectStyle(.soft, for: .top)
+        .scrollEdgeEffectStyle(.hard, for: .top)
         .toolbar(removing: .title)
         .toolbar { settingsToolbar }
     }
@@ -7478,7 +6298,7 @@ private struct SettingsContentPane<Accessory: View, Content: View>: View {
     private var settingsToolbar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
             HStack(spacing: 12) {
-                SettingsNavigationButtons(context: navigationContext)
+                SettingsNavigationButtons(navigation: navigation)
 
                 Text(tab.title)
                     .font(.system(size: 15, weight: .semibold))
@@ -7497,27 +6317,29 @@ private struct SettingsContentPane<Accessory: View, Content: View>: View {
 }
 
 private struct SettingsNavigationButtons: View {
-    let context: SettingsNavigationContext
+    let navigation: SettingsNavigationModel
 
     var body: some View {
         HStack(spacing: 0) {
             navButton(systemImage: "chevron.left",
-                      isEnabled: context.canGoBack,
-                      action: context.goBack)
+                      label: String(localized: "后退"),
+                      isEnabled: navigation.canGoBack,
+                      action: navigation.goBack)
 
             Rectangle()
                 .fill(Color(nsColor: .separatorColor).opacity(0.22))
                 .frame(width: 1, height: 17)
 
             navButton(systemImage: "chevron.right",
-                      isEnabled: context.canGoForward,
-                      action: context.goForward)
+                      label: String(localized: "前进"),
+                      isEnabled: navigation.canGoForward,
+                      action: navigation.goForward)
         }
         .frame(width: 72, height: 32)
         .glassEffect(.regular, in: Capsule())
     }
 
-    private func navButton(systemImage: String, isEnabled: Bool, action: @escaping () -> Void) -> some View {
+    private func navButton(systemImage: String, label: String, isEnabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 17, weight: .medium))
@@ -7527,6 +6349,8 @@ private struct SettingsNavigationButtons: View {
         .buttonStyle(.plain)
         .foregroundStyle(isEnabled ? Color.primary.opacity(0.72) : Color.secondary.opacity(0.28))
         .disabled(!isEnabled)
+        .accessibilityLabel(label)
+        .help(label)
     }
 }
 
@@ -7662,10 +6486,10 @@ enum AccountEditorContext: Identifiable {
 }
 
 struct AccountSettingsView: View {
-    @EnvironmentObject private var accountStore: AccountStore
+    @Environment(AccountStore.self) private var accountStore
     @State private var editor: AccountEditorContext?
     @State private var accountPendingDeletion: StoredAccount?
-    @State private var deviceGUID: String? = try? DeviceGUIDStore.current()
+    @State private var deviceGUID = DeviceGUIDStore.current()
 
     var body: some View {
         SettingsContentPane(tab: .account) {
@@ -7686,6 +6510,8 @@ struct AccountSettingsView: View {
                     }
                     .buttonStyle(StablePressButtonStyle())
                     .glassEffect(.regular.interactive(), in: Circle())
+                    .accessibilityLabel(String(localized: "添加账户"))
+                    .help(String(localized: "添加账户"))
 
                     Spacer(minLength: 0)
                 }
@@ -7732,13 +6558,13 @@ struct AccountSettingsView: View {
             }
         }
         .onAppear {
-            deviceGUID = try? DeviceGUIDStore.current()
+            deviceGUID = DeviceGUIDStore.current()
             presentRequestedRelogin()
         }
         .onChange(of: accountStore.reloginRequestID) { _, _ in presentRequestedRelogin() }
         .sheet(item: $editor) { context in
             AccountEditorView(context: context)
-                .environmentObject(accountStore)
+                .environment(accountStore)
         }
         .confirmationDialog(
             String(localized: "确认删除这个 Apple 账户？"),
@@ -7769,7 +6595,7 @@ struct AccountSettingsView: View {
 }
 
 private struct SettingsDeviceGUIDRow: View {
-    let deviceGUID: String?
+    let deviceGUID: String
     @State private var copied = false
 
     var body: some View {
@@ -7777,23 +6603,20 @@ private struct SettingsDeviceGUIDRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(String(localized: "设备 GUID"))
                     .font(.callout.weight(.semibold))
-                Text(deviceGUID == nil
-                     ? String(localized: "无法获取可靠的设备 GUID。为保护 Apple 账户，Pastel 已阻止登录。请确认正在使用真实 Mac，并在更新系统后重试。")
-                     : String(localized: "用于 Apple Store Services 登录和下载请求。"))
+                Text(String(localized: "用于 Apple Store Services 登录和下载请求。"))
                     .font(.footnote)
-                    .foregroundStyle(deviceGUID == nil ? Color.red : Color.secondary)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer(minLength: 16)
 
-            Text(deviceGUID ?? String(localized: "不可用"))
+            Text(deviceGUID)
                 .font(.system(.callout, design: .monospaced).weight(.medium))
-                .foregroundStyle(deviceGUID == nil ? Color.red : Color.secondary)
+                .foregroundStyle(.secondary)
                 .textSelection(.enabled)
 
             Button {
-                guard let deviceGUID else { return }
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(deviceGUID, forType: .string)
                 copied = true
@@ -7806,7 +6629,8 @@ private struct SettingsDeviceGUIDRow: View {
                     .frame(width: 18, height: 18)
             }
             .buttonStyle(.borderless)
-            .disabled(deviceGUID == nil)
+            .accessibilityLabel(copied ? String(localized: "已复制") : String(localized: "复制设备 GUID"))
+            .help(String(localized: "复制设备 GUID"))
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
@@ -7825,7 +6649,7 @@ private struct AccountSettingsEmptyState: View {
 }
 
 struct AccountSettingsRow: View {
-    @EnvironmentObject private var accountStore: AccountStore
+    @Environment(AccountStore.self) private var accountStore
     let account: StoredAccount
     let onEdit: () -> Void
     let onDelete: () -> Void
@@ -7833,21 +6657,24 @@ struct AccountSettingsRow: View {
     var body: some View {
         let isSelected = account.id == accountStore.selectedAccountID
         HStack(alignment: .center, spacing: 12) {
-            HStack(spacing: 8) {
-                SettingsPill(title: account.countryName, isSelected: isSelected)
+            Button {
+                accountStore.select(account)
+            } label: {
+                HStack(spacing: 8) {
+                    SettingsPill(title: account.countryName, isSelected: isSelected)
 
-                Text(account.displayLabel)
-                    .font(.body)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(isSelected ? Color.white : Color.primary)
-                    .layoutPriority(1)
+                    Text(account.displayLabel)
+                        .font(.body)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(isSelected ? Color.white : Color.primary)
+                        .layoutPriority(1)
+                }
             }
+            .buttonStyle(.plain)
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            .onTapGesture {
-                accountStore.select(account)
-            }
+            .accessibilityLabel(String(localized: "选择账户 \(account.displayLabel)"))
 
             Spacer(minLength: 12)
 
@@ -7953,7 +6780,7 @@ private struct AccountEditorBoxStyle: ViewModifier {
 }
 
 struct AccountEditorView: View {
-    @EnvironmentObject private var accountStore: AccountStore
+    @Environment(AccountStore.self) private var accountStore
     @Environment(\.dismiss) private var dismiss
     @AppStorage("catalogCountry") private var selectedCountryCode = "cn"
     let context: AccountEditorContext
@@ -8179,9 +7006,15 @@ struct LanguageSettingsView: View {
 }
 
 struct AboutSettingsView: View {
-    @EnvironmentObject private var updateManager: AppUpdateManager
+    @Environment(AppUpdateManager.self) private var updateManager
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "26.7"
+    }
+    private var aboutIcon: NSImage? {
+        guard let url = Bundle.main.url(forResource: "PastelAboutIcon", withExtension: "png") else {
+            return nil
+        }
+        return NSImage(contentsOf: url)
     }
     private let thirdParty: [(String, String)] = [
         ("axios", "https://www.npmjs.com/package/axios"),
@@ -8200,10 +7033,21 @@ struct AboutSettingsView: View {
         SettingsContentPane(tab: .about) {
             SettingsGroupBox {
                 HStack(spacing: 14) {
-                    Image(nsImage: NSApp.applicationIconImage)
-                        .resizable()
-                        .frame(width: 52, height: 52)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    Group {
+                        if let aboutIcon {
+                            Image(nsImage: aboutIcon)
+                                .resizable()
+                                .interpolation(.high)
+                        } else {
+                            Image(systemName: "app.fill")
+                                .resizable()
+                                .scaledToFit()
+                                .padding(8)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(width: 52, height: 52)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                     VStack(alignment: .leading, spacing: 5) {
                         Text(appDisplayName)
@@ -8349,7 +7193,9 @@ private struct SettingsActionRow: View {
     }
 }
 
-final class AppUpdateManager: ObservableObject {
+@MainActor
+@Observable
+final class AppUpdateManager {
     let updaterController: SPUStandardUpdaterController
 
     init() {
@@ -8363,6 +7209,7 @@ final class AppUpdateManager: ObservableObject {
     }
 }
 
+@MainActor
 final class CheckForUpdatesViewModel: ObservableObject {
     @Published var canCheckForUpdates = false
 
@@ -8374,12 +7221,12 @@ final class CheckForUpdatesViewModel: ObservableObject {
 }
 
 private struct CheckForUpdatesMenuItem: View {
-    @ObservedObject private var viewModel: CheckForUpdatesViewModel
+    @StateObject private var viewModel: CheckForUpdatesViewModel
     private let updater: SPUUpdater
 
     init(updater: SPUUpdater) {
         self.updater = updater
-        viewModel = CheckForUpdatesViewModel(updater: updater)
+        _viewModel = StateObject(wrappedValue: CheckForUpdatesViewModel(updater: updater))
     }
 
     var body: some View {
@@ -8391,12 +7238,12 @@ private struct CheckForUpdatesMenuItem: View {
 }
 
 private struct CheckForUpdatesSettingsRow: View {
-    @ObservedObject private var viewModel: CheckForUpdatesViewModel
+    @StateObject private var viewModel: CheckForUpdatesViewModel
     private let updater: SPUUpdater
 
     init(updater: SPUUpdater) {
         self.updater = updater
-        viewModel = CheckForUpdatesViewModel(updater: updater)
+        _viewModel = StateObject(wrappedValue: CheckForUpdatesViewModel(updater: updater))
     }
 
     var body: some View {
@@ -8430,6 +7277,7 @@ private struct FocusReleaseClickMonitor: NSViewRepresentable {
         coordinator.uninstall()
     }
 
+    @MainActor
     final class Coordinator {
         var isEditing: Binding<Bool>
         private var monitor: Any?
@@ -8477,6 +7325,7 @@ private struct FocusReleaseClickMonitor: NSViewRepresentable {
     }
 }
 
+@MainActor
 private final class KeyboardShortcutState {
     static let shared = KeyboardShortcutState()
     var isTextEditing = false
@@ -8511,8 +7360,8 @@ struct PastelSettingsCommands: Commands {
 
 @main
 struct PastelApp: App {
-    @StateObject private var accountStore = AccountStore()
-    @StateObject private var updateManager = AppUpdateManager()
+    @State private var accountStore = AccountStore()
+    @State private var updateManager = AppUpdateManager()
 
     init() {
         ApplicationKeyboardShortcutInterceptor.install()
@@ -8521,8 +7370,8 @@ struct PastelApp: App {
     var body: some Scene {
         Window(appDisplayName, id: "main") {
             ContentView()
-                .environmentObject(accountStore)
-                .environmentObject(updateManager)
+                .environment(accountStore)
+                .environment(updateManager)
         }
         .windowStyle(.hiddenTitleBar)
         .windowBackgroundDragBehavior(.disabled)
@@ -8534,13 +7383,14 @@ struct PastelApp: App {
 
         Window(String(localized: "设置"), id: "settings") {
             SettingsRootView()
-                .environmentObject(accountStore)
-                .environmentObject(updateManager)
+                .environment(accountStore)
+                .environment(updateManager)
                 .frame(minWidth: 860, minHeight: 560)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 920, height: 620)
         .windowResizability(.contentMinSize)
+        .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
     }
 }

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import {Ipa} from './src/ipa.js';
 import {featuredApps, fetchVersions, lookupApp, searchApps} from './src/catalog.js';
+import {readCredentials} from './src/credentials.js';
 import {t} from './src/i18n.js';
 
 function requiredEnv(name) {
@@ -89,10 +90,12 @@ async function runCommand(command, args) {
             return;
         }
 
+        const credentials = await readCredentials();
         const app = new Ipa({
-            APPLE_ID: requiredEnv('APPLE_ID'),
-            PASSWORD: requiredEnv('APPLE_PWD'),
-            CODE: process.env.APPLE_CODE || '',
+            APPLE_ID: credentials.appleAccount,
+            PASSWORD: credentials.password,
+            CODE: credentials.code || '',
+            SESSION_KEY: credentials.sessionKey || '',
         });
 
         // 校验账户模式：优先复用本地会话；没有会话时才登录，避免每次编辑/验证账号都触发新设备登录。
@@ -121,9 +124,17 @@ async function runCommand(command, args) {
             appVerId: process.env.DOWNLOAD_VERSION_ID || '',
         });
 
+        console.log('@@IPA:result=success');
         console.log(t('all_done'));
     } catch (err) {
         console.error(err.message || String(err));
-        process.exit(1);
+        process.exitCode = 1;
+    } finally {
+        // StoreServices/curl/HTTP 依赖偶尔会留下活跃句柄。业务和输出都已完成后
+        // 明确结束 CLI，避免 macOS 端永远等不到 Process.terminationHandler。
+        const exitCode = process.exitCode || 0;
+        const stream = exitCode === 0 ? process.stdout : process.stderr;
+        await new Promise(resolve => stream.write('', resolve));
+        process.exit(exitCode);
     }
 })();

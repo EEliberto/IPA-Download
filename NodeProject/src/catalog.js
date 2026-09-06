@@ -206,6 +206,54 @@ async function appPriceInfo(appId, {country = 'us'} = {}) {
     }
 }
 
+function extractStorefrontVersionId(html, appId) {
+    const targetId = asText(appId);
+    const text = asText(html);
+    const pattern = /buyParams["']?\s*:\s*["']([^"']+)["']/g;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+        const encoded = match[1]
+            .replace(/\\u0026/gi, '&')
+            .replace(/&amp;/gi, '&')
+            .replace(/\\\//g, '/');
+        const params = new URLSearchParams(encoded);
+        if (params.get('salableAdamId') !== targetId) continue;
+        if ((params.get('productType') || 'C') !== 'C') continue;
+        const versionId = asText(params.get('appExtVrsId'));
+        if (/^\d+$/.test(versionId)) return versionId;
+    }
+    return '';
+}
+
+// Apple 的历史接口会对部分第三方 App 返回 status=0 + 空 songList。
+// 此时从官方 App Store 产品页读取当前 external version ID，至少保留当前版本入口。
+async function storefrontCurrentVersion(appId, {country = 'us'} = {}) {
+    const cleanCountry = asText(country).toLowerCase() || 'us';
+    try {
+        const [pageResponse, lookupResponse] = await Promise.all([
+            catalogClient.get(`https://apps.apple.com/${cleanCountry}/app/id${encodeURIComponent(appId)}`, {
+                headers: {'Accept': 'text/html,application/xhtml+xml'},
+            }),
+            catalogClient.get('https://itunes.apple.com/lookup', {
+                params: {id: appId, country: cleanCountry, entity: 'software'},
+            }),
+        ]);
+        const versionId = extractStorefrontVersionId(pageResponse.data, appId);
+        if (!versionId) return null;
+        const item = Array.isArray(lookupResponse.data?.results) ? lookupResponse.data.results[0] : null;
+        return {
+            appId: asText(appId),
+            name: asText(item?.trackName || item?.trackCensoredName),
+            latestVersion: asText(item?.version),
+            latestVersionId: versionId,
+            versionIds: [versionId],
+            fallbackCurrentOnly: true,
+        };
+    } catch {
+        return null;
+    }
+}
+
 async function lookupApp(appId, {country = 'cn', platform = 'iphone'} = {}) {
     const cleanPlatform = normalizeSearchPlatform(platform);
     const {data} = await catalogClient.get('https://itunes.apple.com/lookup', {
@@ -494,6 +542,8 @@ export {
     extractAppId,
     featuredApps,
     appPriceInfo,
+    extractStorefrontVersionId,
+    storefrontCurrentVersion,
     lookupApp,
     searchApps,
     fetchVersions,

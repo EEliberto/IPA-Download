@@ -1,9 +1,11 @@
 import {promises as fsPromises, createWriteStream, createReadStream} from 'fs';
+import {once} from 'events';
+import {finished} from 'stream/promises';
 import path from 'path';
+import {execFileSync} from 'child_process';
 import axios from 'axios';
 import PQueue from 'p-queue';
 import {t} from './i18n.js';
-import {systemProxyForURL} from './gsa.js';
 
 const CHUNK = 5 * 1024 * 1024;
 const CONC = 10;
@@ -11,24 +13,21 @@ const RETRIES = 3;
 const RETRY_DELAY = 1000;
 const TIMEOUT = 60000;
 
-// 与登录层共用代理选择。axios 不原生支持 SOCKS，因此 SOCKS 仅用于 curl 驱动的
-// Apple 登录/商店请求；IPA 文件下载仍支持 HTTP(S) 代理。
-function systemProxy(url) {
-    const value = systemProxyForURL(url);
-    if (!value) return false;
+// 读取 macOS 系统代理（与认证层一致），下载也经代理，避免在开启 TLS 解密的网络环境下失败。
+function systemProxy() {
     try {
-        const parsed = new URL(value);
-        if (!['http:', 'https:'].includes(parsed.protocol)) return false;
-        const proxy = {
-            host: parsed.hostname,
-            port: Number(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80),
-            protocol: parsed.protocol.slice(0, -1),
-        };
-        if (parsed.username || parsed.password) {
-            proxy.auth = {username: decodeURIComponent(parsed.username), password: decodeURIComponent(parsed.password)};
-        }
-        return proxy;
-    } catch { return false; }
+        const out = execFileSync('/usr/sbin/scutil', ['--proxy'], {timeout: 5000}).toString();
+        const httpsOn = /HTTPSEnable\s*:\s*1/.test(out);
+        const host = (out.match(/HTTPSProxy\s*:\s*(\S+)/) || [])[1];
+        const port = (out.match(/HTTPSPort\s*:\s*(\d+)/) || [])[1];
+        if (httpsOn && host && port) return {host, port: Number(port), protocol: 'http'};
+    } catch { /* ignore */ }
+    const env = process.env.HTTPS_PROXY || process.env.https_proxy;
+    if (env) {
+        try { const u = new URL(env); return {host: u.hostname, port: Number(u.port) || 80, protocol: 'http'}; }
+        catch { /* ignore */ }
+    }
+    return false;
 }
 
 function sanitize(prefix, rawError, meta = {}) { const err = rawError instanceof Error ? rawError : new Error(String(rawError));
@@ -123,25 +122,22 @@ async function downloadChunkToFile({client, url, start, end, partPath, temp = '.
 
 async function mergeParts({out, dir, parts}) {
     const w = createWriteStream(out);
-    // 当分块数量巨大时，循环中的 pipe 会触发监听器警告。
-    // 在此临时提高限制，以避免在合并大量分块时出现误报。
-    const originalMaxListeners = w.getMaxListeners();
-    if (parts > originalMaxListeners) w.setMaxListeners(parts + 1);
-
     try {
         for (let i = 0; i < parts; i++) {
             const partPath = path.join(dir, `part_${i}`);
             const r = createReadStream(partPath);
-            await new Promise((resolve, reject) => {
-                const onError = (err) => { w.destroy(err); reject(err); };
-                r.on('error', onError); w.on('error', onError);
-                r.on('end', resolve);
-                r.pipe(w, {end: false});
-            });
+            for await (const data of r) {
+                if (!w.write(data)) await once(w, 'drain');
+            }
         }
-    } finally {
-        if (parts > originalMaxListeners) w.setMaxListeners(originalMaxListeners); // 恢复原始限制
         w.end();
+        // end() 只是发起关闭。必须等到文件描述符真正落盘，否则大 IPA
+        // 会在合并仍进行时就进入 MD5/重打包，表现为长时间卡在 100%。
+        await finished(w);
+    } catch (error) {
+        w.destroy(error);
+        await fsPromises.unlink(out).catch(() => {});
+        throw error;
     }
 }
 
@@ -151,7 +147,7 @@ async function download(url, out, dir, auth = {}, opts = {}) { const chunk = opt
     const delay = opts.retryDelayMs || RETRY_DELAY;
     const timeout = opts.timeout || TIMEOUT;
     await fsPromises.mkdir(dir, {recursive: true});
-    const client = axios.create({timeout, proxy: systemProxy(url)});
+    const client = axios.create({timeout, proxy: systemProxy()});
     let size;
     try {
         const h = await client.head(url, {headers: {...auth}, timeout}).catch(async () => {
@@ -189,4 +185,4 @@ async function download(url, out, dir, auth = {}, opts = {}) { const chunk = opt
     return {fileSize: size, parts};
 }
 
-export {download};
+export {download, mergeParts};
