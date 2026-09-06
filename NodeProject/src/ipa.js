@@ -305,8 +305,12 @@ export class Ipa {
         this.cache = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ipa-history-download-parts-'));
         console.log(t('temp_dir', {cache: this.cache}));
         try {
-            const purchaseResult = await Store.purchase(APPID, appVerId, this.auth);
-            console.log(t('purchase_ok', {message: purchaseResult.customerMessage}));
+            // A version download uses the license that AppInfo already verifies.
+            // Calling buyProduct again here is unnecessary and breaks existing
+            // licenses because StoreServices commonly answers a repeated request
+            // with failureType 5002 and a generic “unknown error” message.
+            // New free Apps are acquired explicitly by listVersionIds() only
+            // after the user confirms the acquisition prompt.
             const song = await this.info(APPID, appVerId);
             const res = await download(song.URL, this.out, this.cache, this.auth.authHeaders || {});
             console.log(t('download_complete', {mb: (res.fileSize / 1024 / 1024).toFixed(2), parts: res.parts}));

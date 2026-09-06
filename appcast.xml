@@ -6,7 +6,7 @@
             <title>20260906</title>
             <pubDate>Sun, 06 Sep 2026 17:30:00 +0800</pubDate>
             <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel20260906</link>
-            <sparkle:version>2026090604</sparkle:version>
+            <sparkle:version>2026090605</sparkle:version>
             <sparkle:shortVersionString>20260906</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
@@ -29,7 +29,7 @@
 
 如果你在使用 Pastel 时遇到任何问题，请在 Github 中提交 Issue。
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel20260906/Pastel-20260906-build-2026090604.dmg" length="55337248" type="application/octet-stream" sparkle:edSignature="EurJlLwnYqNInd6NSOeEh1SMJ7DMU4sGR52OK/t/U30dXZBJsfCIWufOjjYi2X0MD0BTXsN6QVqJWh8mujmHBA=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel20260906/Pastel-20260906-build-2026090605.dmg" length="55327212" type="application/octet-stream" sparkle:edSignature="/icpat7+XkagEZ3zj7wWMXEz6GxoUwzkbwOfGcuFPXVvVeXzgBpC3cwBMZ/7zZwGWiZNNAkhouQl3W76XiCjDg=="/>
         </item>
         <item>
             <title>20260901</title>

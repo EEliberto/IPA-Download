@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,4 +22,12 @@ test('mergeParts resolves only after the complete IPA is flushed', async () => {
     } finally {
         await rm(dir, {recursive: true, force: true});
     }
+});
+
+test('normal downloads reuse the existing license without calling buyProduct', () => {
+    const source = readFileSync(new URL('../src/ipa.js', import.meta.url), 'utf8');
+    const runDownload = source.match(/async runDownload\([\s\S]*?\n    async run\(/)?.[0] || '';
+    assert.notEqual(runDownload, '');
+    assert.doesNotMatch(runDownload, /Store\.purchase\(/);
+    assert.match(runDownload, /const song = await this\.info\(APPID, appVerId\)/);
 });
