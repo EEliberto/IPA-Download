@@ -41,10 +41,36 @@ export function isAuthFailureResponse(failureType, customerMessage, statusCode =
 
 export function appInfoFailureCode(failureType, customerMessage) {
     const type = String(failureType || '');
+    const message = String(customerMessage || '').replace(/\u00a0/g, ' ');
     if (type === '9610') return 'LICENSE_NOT_FOUND';
     if (type === '2059') return 'APPINFO_BUSY';
-    if (/License not found/i.test(String(customerMessage || ''))) return 'LICENSE_NOT_FOUND';
+    if (/License not found|Redownload Unavailable with This Apple Account/i.test(message)) {
+        return 'LICENSE_NOT_FOUND';
+    }
     return type || customerMessage ? 'APPINFO_FAIL' : '';
+}
+
+export function purchaseSuccessKind(response) {
+    const failureType = String(response?.failureType || '');
+    const customerMessage = String(response?.customerMessage || '').replace(/\u00a0/g, ' ');
+
+    // buyProduct is idempotent for an App already in the account library, but
+    // failureType 5002 is also used for unrelated StoreServices failures. Only
+    // accept it when Apple explicitly says that the license already exists.
+    if (failureType === '5002'
+        && /License already exists|already (?:in (?:your|the) library|owned|purchased)/i.test(customerMessage)) {
+        return 'existing';
+    }
+
+    // Match ApplePackage's strict purchase contract. HTTP 500, status=0 by
+    // itself, or a failureType must never be promoted to a successful purchase.
+    if (!failureType
+        && response?._httpStatus === 200
+        && response?.jingleDocType === 'purchaseSuccess'
+        && response?.status === 0) {
+        return 'new';
+    }
+    return '';
 }
 
 const _endpoints = {
@@ -201,10 +227,9 @@ class Store {
         };
         for (const pricingParameters of ['STDQ', 'GAME']) {
             const parsedResp = this.#storePost(t('label_purchase'), url, endpoint.buildBody({appid, appVerId, guid: this.guid, pricingParameters}), headers, authContext);
-            if (parsedResp.status === 0 || parsedResp.failureType === '5002' || parsedResp._httpStatus === 500) {
-                let message = t('lic_success');
-                if (parsedResp.failureType === '5002' || parsedResp._httpStatus === 500) message = t('lic_in_library');
-                else if (parsedResp.status === 0) message = t('lic_new');
+            const successKind = purchaseSuccessKind(parsedResp);
+            if (successKind) {
+                const message = successKind === 'existing' ? t('lic_in_library') : t('lic_new');
                 return {...parsedResp, _state: 'success', customerMessage: message};
             }
             if (isAuthFailureResponse(parsedResp.failureType, parsedResp.customerMessage)) {

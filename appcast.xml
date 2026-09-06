@@ -4,9 +4,9 @@
         <title>Pastel</title>
         <item>
             <title>20260906</title>
-            <pubDate>Sun, 06 Sep 2026 16:01:13 +0800</pubDate>
+            <pubDate>Sun, 06 Sep 2026 17:30:00 +0800</pubDate>
             <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel20260906</link>
-            <sparkle:version>2026090603</sparkle:version>
+            <sparkle:version>2026090604</sparkle:version>
             <sparkle:shortVersionString>20260906</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
@@ -24,11 +24,12 @@
 7. 内置运行环境升级至 Node.js 24 LTS，并提高依赖与构建的稳定性。
 8. 优化下载任务状态管理，减少任务卡住、错误状态残留和重复点击无效的问题。
 9. 改进设置、支持、添加账户、拷贝和前后导航等按钮的辅助功能支持。
-10. 修复其他已知问题并改进细节体验。
+10. 修复从未获取过的免费 App 无法从 Apple 获取并下载的问题。
+11. 修复其他已知问题并改进细节体验。
 
 如果你在使用 Pastel 时遇到任何问题，请在 Github 中提交 Issue。
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel20260906/Pastel-20260906-build-2026090603.dmg" length="55337472" type="application/octet-stream" sparkle:edSignature="u7GDl3lqvgdzAABhCAdbjrnov0goaNIIIMdjUw9sfj4xZ2QuDTjf7liP1FI/ucG2YEnzn3PHiWpN3WZpZCfhBA=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel20260906/Pastel-20260906-build-2026090604.dmg" length="55337248" type="application/octet-stream" sparkle:edSignature="EurJlLwnYqNInd6NSOeEh1SMJ7DMU4sGR52OK/t/U30dXZBJsfCIWufOjjYi2X0MD0BTXsN6QVqJWh8mujmHBA=="/>
         </item>
         <item>
             <title>20260901</title>

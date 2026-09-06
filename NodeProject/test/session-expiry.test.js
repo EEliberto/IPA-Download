@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import plist from 'plist';
-import {appInfoFailureCode, isAuthFailureResponse} from '../src/client.js';
+import {appInfoFailureCode, isAuthFailureResponse, purchaseSuccessKind} from '../src/client.js';
 import {
     buildLoginBody,
     buildSignedAuthenticationHeaders,
@@ -34,7 +34,35 @@ test('does not mistake Apple busy responses for a missing license', () => {
     assert.equal(appInfoFailureCode('2059', ''), 'APPINFO_BUSY');
     assert.equal(appInfoFailureCode('5002', ''), 'APPINFO_FAIL');
     assert.equal(appInfoFailureCode('', 'License not found'), 'LICENSE_NOT_FOUND');
+    assert.equal(appInfoFailureCode('', 'Redownload Unavailable with This Apple Account'), 'LICENSE_NOT_FOUND');
+    assert.equal(appInfoFailureCode('', 'Redownload Unavailable with This Apple\u00a0Account'), 'LICENSE_NOT_FOUND');
     assert.equal(appInfoFailureCode('', 'Temporarily unavailable'), 'APPINFO_FAIL');
+});
+
+test('accepts only explicit buyProduct success or an existing license', () => {
+    assert.equal(purchaseSuccessKind({
+        _httpStatus: 200,
+        jingleDocType: 'purchaseSuccess',
+        status: 0,
+    }), 'new');
+    assert.equal(purchaseSuccessKind({
+        _httpStatus: 500,
+        status: 0,
+    }), '');
+    assert.equal(purchaseSuccessKind({
+        _httpStatus: 200,
+        status: 0,
+    }), '');
+    assert.equal(purchaseSuccessKind({
+        _httpStatus: 500,
+        failureType: '5002',
+        customerMessage: 'An unknown error has occurred.',
+    }), '');
+    assert.equal(purchaseSuccessKind({
+        _httpStatus: 500,
+        failureType: '5002',
+        customerMessage: 'License already exists',
+    }), 'existing');
 });
 
 test('keeps the missing-license and Apple-busy states distinct in source', () => {
