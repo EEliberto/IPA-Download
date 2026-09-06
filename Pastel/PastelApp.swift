@@ -2219,7 +2219,7 @@ struct ContentView: View {
             .visibilityPriority(.high)
 
             ToolbarItem(placement: .primaryAction) {
-                toolbarSupportButton
+                toolbarStarButton
             }
             .sharedBackgroundVisibility(.hidden)
 
@@ -2235,7 +2235,7 @@ struct ContentView: View {
             .sharedBackgroundVisibility(.hidden)
 
             ToolbarItem(placement: .primaryAction) {
-                toolbarSupportButton
+                toolbarStarButton
             }
             .sharedBackgroundVisibility(.hidden)
 
@@ -2267,20 +2267,20 @@ struct ContentView: View {
         .help(String(localized: "设置"))
     }
 
-    private var toolbarSupportButton: some View {
+    private var toolbarStarButton: some View {
         Button {
-            openAuthorGitHub()
+            openProjectPage()
         } label: {
-            Image(systemName: "heart.fill")
+            Image(systemName: "star.fill")
                 .font(.system(size: 14, weight: .regular))
-                .foregroundStyle(.red)
+                .foregroundStyle(.yellow)
                 .frame(width: 35, height: 35)
                 .contentShape(Circle())
                 .glassEffect(.regular, in: Circle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(String(localized: "支持开发者"))
-        .help(String(localized: "支持开发者"))
+        .accessibilityLabel("GitHub Star")
+        .help("GitHub Star")
     }
 
     private func showSettings() {
@@ -2292,8 +2292,8 @@ struct ContentView: View {
         showSettings()
     }
 
-    private func openAuthorGitHub() {
-        if let url = URL(string: "https://github.com/EEliberto/IPA-Download") {
+    private func openProjectPage() {
+        if let url = URL(string: "https://github.com/EEliberto/Pastel-macOS") {
             NSWorkspace.shared.open(url)
         }
     }
@@ -7081,23 +7081,19 @@ struct AboutSettingsView: View {
 
                 SettingsGroupDivider()
 
-                SettingsLinkRow(title: String(localized: "制作人"),
-                                subtitle: "EEliberto",
-                                url: "https://github.com/EEliberto/IPA-Download")
+                SettingsInfoRow(title: String(localized: "制作人"),
+                                subtitle: "EEliberto")
             }
 
             SettingsGroupBox(String(localized: "开源项目")) {
-                SettingsLinkRow(title: "ipatool.ts",
-                                subtitle: String(localized: "下载与购买逻辑参考"),
-                                url: "https://github.com/beerpiss/ipatool.ts")
+                SettingsInfoRow(title: "ipatool.ts",
+                                subtitle: String(localized: "下载与购买逻辑参考"))
                 SettingsGroupDivider()
-                SettingsLinkRow(title: "Asspp",
-                                subtitle: String(localized: "下载与购买逻辑参考"),
-                                url: "https://github.com/Lakr233/Asspp")
+                SettingsInfoRow(title: "Asspp",
+                                subtitle: String(localized: "下载与购买逻辑参考"))
                 SettingsGroupDivider()
-                SettingsLinkRow(title: "SideStore · apple-private-apis",
-                                subtitle: String(localized: "登录流程参考（GSA / SRP / 2FA / Anisette）"),
-                                url: "https://github.com/SideStore/apple-private-apis")
+                SettingsInfoRow(title: "SideStore · apple-private-apis",
+                                subtitle: String(localized: "登录流程参考（GSA / SRP / 2FA / Anisette）"))
                 SettingsGroupDivider()
                 SettingsLinkRow(title: "Node.js",
                                 subtitle: String(localized: "内置运行时"),
@@ -7127,6 +7123,27 @@ struct AboutSettingsView: View {
                 SettingsLinkRow(title: "Bilin", subtitle: String(localized: "历史版本数据源"), url: "https://apis.bilin.eu.org")
             }
         }
+    }
+}
+
+private struct SettingsInfoRow: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
     }
 }
 

@@ -12,9 +12,9 @@
   </p>
 
   <p>
-    <a href="https://github.com/EEliberto/IPA-Download/releases/latest"><strong>下载最新版</strong></a>
+    <a href="https://github.com/EEliberto/Pastel-macOS/releases/latest"><strong>下载最新版</strong></a>
     ·
-    <a href="https://github.com/EEliberto/IPA-Download/issues">提交问题</a>
+    <a href="https://github.com/EEliberto/Pastel-macOS/issues">提交问题</a>
     ·
     <a href="#源码构建">源码构建</a>
   </p>
@@ -70,7 +70,7 @@ Pastel 聚合 Timbrd、Agsy 与 Bilin 的版本 ID 信息，也可以直接从 A
 
 ## 初次使用
 
-1. 从 [GitHub Releases](https://github.com/EEliberto/IPA-Download/releases/latest) 下载最新 DMG，并将 Pastel 拖入“应用程序”。
+1. 从 [GitHub Releases](https://github.com/EEliberto/Pastel-macOS/releases/latest) 下载最新 DMG，并将 Pastel 拖入“应用程序”。
 2. 打开 Pastel，前往“设置” → “Apple 账户”。
 3. 添加 Apple 账户并按提示完成双重认证。
 4. 登录成功后，Pastel 会识别账户所属地区并完成商店配置。
@@ -123,5 +123,5 @@ cd ..
 ---
 
 <div align="center">
-  <sub>如果 Pastel 对你有帮助，欢迎 Star 本项目；遇到问题请前往 <a href="https://github.com/EEliberto/IPA-Download/issues">GitHub Issues</a>。</sub>
+  <sub>如果 Pastel 对你有帮助，欢迎 Star 本项目；遇到问题请前往 <a href="https://github.com/EEliberto/Pastel-macOS/issues">GitHub Issues</a>。</sub>
 </div>
