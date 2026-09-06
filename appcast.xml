@@ -11,21 +11,21 @@
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <sparkle:criticalUpdate/>
-            <description sparkle:format="markdown"><![CDATA[感谢你使用 Pastel！
+            <description sparkle:format="plain-text"><![CDATA[感谢你使用 Pastel！
 
 本次更新针对 macOS 27 Goldeen Gate 行了全面适配，图标也焕然一新！还重点改善下载可靠性、安全性与使用体验。此次更新内容：
 
-1\\. 优化 macOS 27 与新版 Liquid Glass 的显示效果，同时继续支持 macOS 26。<br>
-2\\. 修复点击“下载”后偶尔没有反应的问题。<br>
-3\\. 修复下载进度停留在 100%，但任务无法结束的问题。<br>
-4\\. 修复部分第三方 App 无法通过 Apple 来源查询历史版本的问题。<br>
-5\\. 改进 Apple 账户登录与会话恢复，减少重复登录和异常失效。<br>
-6\\. 加强凭据安全：密码与验证码不再通过环境变量传递，会话数据改为加密保存。<br>
-7\\. 内置运行环境升级至 Node.js 24 LTS，并提高依赖与构建的稳定性。<br>
-8\\. 优化下载任务状态管理，减少任务卡住、错误状态残留和重复点击无效的问题。<br>
-9\\. 改进设置、支持、添加账户、拷贝和前后导航等按钮的辅助功能支持。<br>
-10\\. 修复从未获取过的免费 App 无法从 Apple 获取并下载的问题。<br>
-11\\. 修复其他已知问题并改进细节体验。
+1. 优化 macOS 27 与新版 Liquid Glass 的显示效果，同时继续支持 macOS 26。
+2. 修复点击“下载”后偶尔没有反应的问题。
+3. 修复下载进度停留在 100%，但任务无法结束的问题。
+4. 修复部分第三方 App 无法通过 Apple 来源查询历史版本的问题。
+5. 改进 Apple 账户登录与会话恢复，减少重复登录和异常失效。
+6. 加强凭据安全：密码与验证码不再通过环境变量传递，会话数据改为加密保存。
+7. 内置运行环境升级至 Node.js 24 LTS，并提高依赖与构建的稳定性。
+8. 优化下载任务状态管理，减少任务卡住、错误状态残留和重复点击无效的问题。
+9. 改进设置、支持、添加账户、拷贝和前后导航等按钮的辅助功能支持。
+10. 修复从未获取过的免费 App 无法从 Apple 获取并下载的问题。
+11. 修复其他已知问题并改进细节体验。
 
 如果你在使用 Pastel 时遇到任何问题，请在 Github 中提交 Issue。
 ]]></description>
