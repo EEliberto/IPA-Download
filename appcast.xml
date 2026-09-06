@@ -4,36 +4,28 @@
         <title>Pastel</title>
         <item>
             <title>20260906</title>
-            <pubDate>Sun, 06 Sep 2026 10:41:55 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel20260906</link>
-            <sparkle:version>20260906</sparkle:version>
+            <pubDate>Sun, 06 Sep 2026 10:52:23 +0800</pubDate>
+            <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel20260906</link>
+            <sparkle:version>2026090601</sparkle:version>
             <sparkle:shortVersionString>20260906</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <sparkle:criticalUpdate/>
             <description sparkle:format="markdown"><![CDATA[感谢你使用 Pastel！
 
-本次更新针对 macOS 27 Golden Gate 进行了全面适配，图标也焕然一新！还重点改善了下载可靠性、安全性与使用体验。此次更新内容：
+本次补充更新包含以下改进：
 
-1. 优化 macOS 27 与新版 Liquid Glass 的显示效果，同时继续支持 macOS 26。
-2. 修复点击“下载”后偶尔没有反应的问题。
-3. 修复下载进度停留在 100%，但任务无法结束的问题。
-4. 修复部分第三方 App 无法通过 Apple 来源查询历史版本的问题。
-5. 改进 Apple 账户登录与会话恢复，减少重复登录和异常失效。
-6. 加强凭据安全：密码与验证码不再通过环境变量传递，会话数据改为加密保存。
-7. 内置运行环境升级至 Node.js 24 LTS，并提高依赖与构建的稳定性。
-8. 优化下载任务状态管理，减少任务卡住、错误状态残留和重复点击无效的问题。
-9. 改进设置、支持、添加账户、拷贝和前后导航等按钮的辅助功能支持。
-10. 修复其他已知问题并改进细节体验。
-
-如果你在使用 Pastel 时遇到任何问题，请在 GitHub 中提交 Issue。
+1. 将主窗口工具栏中的爱心按钮更换为黄色 Star 按钮。
+2. 精简“关于”页面中的 GitHub 外部链接，同时保留必要的项目与依赖说明。
+3. 更新项目与自动更新源地址。
+4. 修复其他细节问题。
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel20260906/Pastel-20260906-build-20260906.dmg" length="55321373" type="application/octet-stream" sparkle:edSignature="7p/MndMF0+jl2kr9XUffpcJpIDKaldn2MTrj/gCKmhPSdpUi1w/W3ehoRfLUGx9d9wUoCY7rHYU5ujm6mIZ3AQ=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel20260906/Pastel-20260906-build-2026090601.dmg" length="55314355" type="application/octet-stream" sparkle:edSignature="7YKICEFMXFQyzlCyED2+ZFMaPsfDEFi9aJFYaAUl1eIYTOL7FfcWIPZRmGm5hdaRYqdLvG5y06oyJrpDJAzXCw=="/>
         </item>
         <item>
             <title>20260901</title>
             <pubDate>Tue, 01 Sep 2026 21:13:45 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel20260901</link>
+            <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel20260901</link>
             <sparkle:version>20260901</sparkle:version>
             <sparkle:shortVersionString>20260901</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
@@ -50,12 +42,12 @@
 
 如果你有任何问题，请在 GitHub 中提交 Issue。谢谢！
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel20260901/Pastel-20260901.dmg" length="53775258" type="application/octet-stream" sparkle:edSignature="eNzCexIiENTJUfhGl1KQBVPRVfPit5esL+WI0atUScb5gIVsQLvwIuXvYgmGxD5TK/j+dIgdziMlEje0fmLRCQ=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel20260901/Pastel-20260901.dmg" length="53775258" type="application/octet-stream" sparkle:edSignature="eNzCexIiENTJUfhGl1KQBVPRVfPit5esL+WI0atUScb5gIVsQLvwIuXvYgmGxD5TK/j+dIgdziMlEje0fmLRCQ=="/>
         </item>
         <item>
             <title>26.7.1</title>
             <pubDate>Mon, 27 Jul 2026 16:12:00 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel10</link>
+            <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel10</link>
             <sparkle:version>10</sparkle:version>
             <sparkle:shortVersionString>26.7.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
@@ -84,12 +76,12 @@ Fixed several known issues.
 
 แก้ไขปัญหาที่ทราบบางรายการ
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel10/Pastel-26.7.1-build-10.dmg" length="53879378" type="application/octet-stream" sparkle:edSignature="u7L+CcjXviiMCWStvCsmzQX8FJBoA5j8m0NUtp60erst4Qg4Y5cCA8sqkI4Bx/edtjo6lYnO1EDLwWPLcUEJDw=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel10/Pastel-26.7.1-build-10.dmg" length="53879378" type="application/octet-stream" sparkle:edSignature="u7L+CcjXviiMCWStvCsmzQX8FJBoA5j8m0NUtp60erst4Qg4Y5cCA8sqkI4Bx/edtjo6lYnO1EDLwWPLcUEJDw=="/>
         </item>
         <item>
             <title>26.7</title>
             <pubDate>Mon, 22 Jun 2026 09:26:46 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel9</link>
+            <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel9</link>
             <sparkle:version>9</sparkle:version>
             <sparkle:shortVersionString>26.7</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
@@ -220,12 +212,12 @@ Pastel 26.6 업데이트 내용:
 2. รองรับการเลือก App หลายเวอร์ชันเพื่อดาวน์โหลดหรือลบ
 3. เมื่อใช้ Apple เป็นแหล่งข้อมูล หากตรวจพบว่าเป็น App ที่ยังไม่เคยได้รับมาก่อน Pastel จะขอการยืนยันอีกครั้ง
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel9/Pastel-26.7-build-9.dmg" length="51395304" type="application/octet-stream" sparkle:edSignature="5Zn1/qMTEDl+8k64pJxpq0FrrDGHyW50Xg+XP/tf5kwElcfBmapuM6YAnFoa1tDGCvb/v9TvhSWRESTcp8xECQ=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel9/Pastel-26.7-build-9.dmg" length="51395304" type="application/octet-stream" sparkle:edSignature="5Zn1/qMTEDl+8k64pJxpq0FrrDGHyW50Xg+XP/tf5kwElcfBmapuM6YAnFoa1tDGCvb/v9TvhSWRESTcp8xECQ=="/>
         </item>
         <item>
             <title>26.6.1</title>
             <pubDate>Sun, 21 Jun 2026 12:25:23 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel7</link>
+            <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel7</link>
             <sparkle:version>7</sparkle:version>
             <sparkle:shortVersionString>26.6.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
@@ -302,12 +294,12 @@ Pastel 26.6.1을 제공합니다.
 2. รองรับการเลือก App หลายเวอร์ชันเพื่อดาวน์โหลด โดยกด Command ค้างไว้
 3. เมื่อใช้ Apple เป็นแหล่งข้อมูล หากตรวจพบว่าเป็น App ที่ยังไม่เคยได้รับมาก่อน Pastel จะขอการยืนยันอีกครั้ง
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel7/Pastel-26.6.1-build-7.dmg" length="39215469" type="application/octet-stream" sparkle:edSignature="V/cZKuE3ybTPNIjOB8c7SW6BGx7AUZUgBcXuXwpOWoi9t3IXg71/3RX1lc23giSDfF8i4b11XSQKEPvQI410Dw=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel7/Pastel-26.6.1-build-7.dmg" length="39215469" type="application/octet-stream" sparkle:edSignature="V/cZKuE3ybTPNIjOB8c7SW6BGx7AUZUgBcXuXwpOWoi9t3IXg71/3RX1lc23giSDfF8i4b11XSQKEPvQI410Dw=="/>
         </item>
         <item>
             <title>26.6.1</title>
             <pubDate>Sat, 20 Jun 2026 18:34:52 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel6</link>
+            <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel6</link>
             <sparkle:version>6</sparkle:version>
             <sparkle:shortVersionString>26.6.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
@@ -384,12 +376,12 @@ Pastel 26.6.1을 제공합니다.
 2. รองรับการเลือก App หลายเวอร์ชันเพื่อดาวน์โหลด โดยกด Command ค้างไว้
 3. เมื่อใช้ Apple เป็นแหล่งข้อมูล หากตรวจพบว่าเป็น App ที่ยังไม่เคยได้รับมาก่อน Pastel จะขอการยืนยันอีกครั้ง
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel6/Pastel-26.6.1-build-6.dmg" length="47583343" type="application/octet-stream" sparkle:edSignature="Xb2UvW2c3t6GGdIZ7Vj6YCD31WnWv34QHTY1qXXOVXAERMtvRCVHjCiBrYkCDW4mPf+Oqnx/X5ReciRHC6d7Dw=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel6/Pastel-26.6.1-build-6.dmg" length="47583343" type="application/octet-stream" sparkle:edSignature="Xb2UvW2c3t6GGdIZ7Vj6YCD31WnWv34QHTY1qXXOVXAERMtvRCVHjCiBrYkCDW4mPf+Oqnx/X5ReciRHC6d7Dw=="/>
         </item>
         <item>
             <title>26.6</title>
             <pubDate>Tue, 16 Jun 2026 01:18:22 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel5</link>
+            <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel5</link>
             <sparkle:version>5</sparkle:version>
             <sparkle:shortVersionString>26.6</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
@@ -520,12 +512,12 @@ Pastel 사용 중 문제가 있으면 GitHub에 Issue를 제출해 주세요.
 
 หากพบปัญหาระหว่างใช้งาน Pastel โปรดส่ง Issue บน GitHub
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel5/Pastel-26.6-build-5.dmg" length="51942958" type="application/octet-stream" sparkle:edSignature="LZctjoXrfyOVWBYC+u+9moHNgKnl/7XAPDoc8VxhCUFf9c4SvvMIW1tR9PT+sMVyr21epq8VOYgwdwUkXBHJCQ=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel5/Pastel-26.6-build-5.dmg" length="51942958" type="application/octet-stream" sparkle:edSignature="LZctjoXrfyOVWBYC+u+9moHNgKnl/7XAPDoc8VxhCUFf9c4SvvMIW1tR9PT+sMVyr21epq8VOYgwdwUkXBHJCQ=="/>
         </item>
         <item>
             <title>26.5.2</title>
             <pubDate>Mon, 15 Jun 2026 16:19:01 +0800</pubDate>
-            <link>https://github.com/EEliberto/IPA-Download/releases/tag/Pastel3</link>
+            <link>https://github.com/EEliberto/Pastel-macOS/releases/tag/Pastel3</link>
             <sparkle:version>3</sparkle:version>
             <sparkle:shortVersionString>26.5.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
@@ -614,7 +606,7 @@ Pastel 사용 중 문제가 있으면 GitHub에 Issue를 제출해 주세요.
 
 หากพบปัญหาระหว่างใช้งาน Pastel โปรดส่ง Issue บน GitHub
 ]]></description>
-            <enclosure url="https://github.com/EEliberto/IPA-Download/releases/download/Pastel3/Pastel-26.5.2-build-3.dmg" length="37806080" type="application/octet-stream" sparkle:edSignature="lTZQM5+pYXEoTVGFe23MgE57GIWO5jZDRawOXTPOsTTJ5x2S0JxtzoIbtLl6RwDPfBQOcR1hjTwTd6dRXmDmDg=="/>
+            <enclosure url="https://github.com/EEliberto/Pastel-macOS/releases/download/Pastel3/Pastel-26.5.2-build-3.dmg" length="37806080" type="application/octet-stream" sparkle:edSignature="lTZQM5+pYXEoTVGFe23MgE57GIWO5jZDRawOXTPOsTTJ5x2S0JxtzoIbtLl6RwDPfBQOcR1hjTwTd6dRXmDmDg=="/>
         </item>
     </channel>
 </rss>
