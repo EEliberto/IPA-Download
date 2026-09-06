@@ -2,7 +2,7 @@
 
 # Xcode
 DerivedData/
-build/
+/build/
 *.xcuserstate
 xcuserdata/
 *.moved-aside
