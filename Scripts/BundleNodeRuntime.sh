@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+sh "${SRCROOT}/Scripts/VerifyDeviceGUIDImplementation.sh" "${SRCROOT}/Pastel/PastelApp.swift"
+
 resources="${CODESIGNING_FOLDER_PATH}/Contents/Resources"
 stage="${DERIVED_FILE_DIR}/NodeRuntime/NodeProject"
 node_archive="${SRCROOT}/node/bin/node.gz"

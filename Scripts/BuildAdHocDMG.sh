@@ -10,6 +10,9 @@ output_dir=${PASTEL_OUTPUT_DIR:-"${project_root}/dist"}
 
 export DEVELOPER_DIR="$developer_dir"
 
+sh "${project_root}/Scripts/VerifyDeviceGUIDImplementation.sh" \
+    "${project_root}/Pastel/PastelApp.swift"
+
 xcodebuild \
     -project "${project_root}/Pastel.xcodeproj" \
     -scheme Pastel \

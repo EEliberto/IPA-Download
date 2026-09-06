@@ -15,4 +15,5 @@ $(SRCROOT)/node/lib/node_modules/npm/package.json
 $(SRCROOT)/Scripts/SAPSigner.m
 $(SRCROOT)/Scripts/NodeJIT.entitlements
 $(SRCROOT)/Scripts/BundleNodeRuntime.sh
+$(SRCROOT)/Scripts/VerifyDeviceGUIDImplementation.sh
 $(SRCROOT)/Scripts/PatchSparkleLocalizations.sh
